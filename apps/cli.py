@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""
+Roomba CLI Tool
+===============
+
+Interactive CLI for controlling a Roomba through the Open Interface (OI).
+
+Uses:
+- L2 OIService: wraps PySerialPort, oi_codec, and oi_protocol.
+- Provides high-level convenience commands (start, safe, dock, sensors, etc.).
+
+Features:
+- Logs all received data (HEX + ASCII).
+- Interactive prompt for sending common OI commands.
+- Supports RTS/BRC pin management (wakeup, rts_low, rts_high).
+"""
+
+import argparse
+import time
+from roomba_stack.l2_oi.oi_service import OIService
+
+
+def rx_logger(packet_id: int, parsed: object) -> None:
+    """
+    RX callback: logs parsed sensor updates.
+    """
+    print(f"[RX] Packet {packet_id}: {parsed}")
+
+
+def print_help() -> None:
+    """
+    Show available commands.
+    """
+    print("""
+Available Commands:
+  reset        - Soft reset (opcode 7 / 0x07)
+  start        - Enter OI Passive mode (opcode 128 / 0x80)
+  safe         - Enter SAFE mode (opcode 131 / 0x83)
+  full         - Enter FULL mode (opcode 132 / 0x84)
+  dock         - Seek Home Base (opcode 143 / 0x8F)
+  power_off    - Power down (opcode 133 / 0x85)
+
+  rts_low      - Force RTS LOW (BRC active, no opcode)
+  rts_high     - Force RTS HIGH (BRC inactive, no opcode)
+  wakeup       - Pulse RTS LOW→HIGH to wake Roomba (BRC action)
+  deep_off     - Force deep off: RTS LOW + POWER OFF (133)
+
+  sensors [id] - Poll sensor data once (opcode 142 / 0x8E, default id=0 → all)
+                 Example: sensors 7
+
+  stream ids   - Start continuous streaming of packets
+                 Example: stream 1 7
+  stop_stream  - Stop continuous streaming (opcode 150 / 0x96)
+
+  help         - Show this help menu
+  quit         - Exit CLI
+""")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Roomba CLI")
+    parser.add_argument("--device", default="/dev/ttyUSB0", help="Serial device path")
+    parser.add_argument("--baud", type=int, default=115200, help="Baud rate")
+    args = parser.parse_args()
+
+    # Initialize OIService
+    svc = OIService(device=args.device, baudrate=args.baud)
+    svc.open()
+    svc.set_on_sensor(rx_logger)
+
+    print("Roomba CLI started. Type 'help' for commands.")
+
+    while True:
+        try:
+            cmd = input("> ").strip().lower()
+
+            if cmd == "reset":
+                svc.reset()
+                print("Reset in progress...")
+                time.sleep(5)
+            elif cmd == "start":
+                svc.start()
+            elif cmd == "safe":
+                svc.safe()
+            elif cmd == "full":
+                svc.full()
+            elif cmd == "dock":
+                svc.dock()
+            elif cmd == "power_off":
+                svc.power_off()
+            elif cmd == "rts_low":
+                svc._port.set_rts_low()
+            elif cmd == "rts_high":
+                svc._port.set_rts_high()
+            elif cmd == "wakeup":
+                svc._port.pulse_wakeup()
+            elif cmd == "deep_off":
+                svc._port.set_rts_low()
+                svc.power_off()
+                print("[INFO] Deep off: Roomba will stay OFF until wakeup pulse or CLEAN button.")
+            elif cmd.startswith("sensors"):
+                parts = cmd.split()
+                if len(parts) == 2 and parts[1].isdigit():
+                    packet_id = int(parts[1])
+                else:
+                    packet_id = 0  # all sensors
+                parsed = svc.get_sensor(packet_id)
+                print(f"[TX] Requested sensor {packet_id} → {parsed}")
+            elif cmd.startswith("stream"):
+                # Example: stream 1 7
+                parts = cmd.split()
+                ids = [int(x) for x in parts[1:] if x.isdigit()]
+                if not ids:
+                    print("Usage: stream <id1> <id2> ...")
+                else:
+                    svc.start_stream(ids)
+                    print(f"[TX] Streaming packets: {ids}")
+            elif cmd == "stop_stream":
+                svc.stop_stream()
+                print("[TX] Stop sensor stream")
+            elif cmd == "help":
+                print_help()
+            elif cmd in ("quit", "exit"):
+                print("Exiting...")
+                break
+            elif cmd == "":
+                continue
+            else:
+                print("Unknown command. Type 'help' for options.")
+        except KeyboardInterrupt:
+            print("\nExiting...")
+            break
+
+    svc.close()
+
+
+if __name__ == "__main__":
+    main()

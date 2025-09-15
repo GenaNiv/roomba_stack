@@ -1,0 +1,16 @@
+from __future__ import annotations
+from typing import Protocol, Callable, Optional
+
+BytesCallback = Callable[[bytes], None]
+
+class SerialError(Exception):
+    """Generic serial error for serial adapter issues."""
+
+class SerialPort(Protocol):
+    """Abstract serial port adapter (no pyserial details leak upward)."""
+
+    def open(self) -> None: ...
+    def close(self) -> None: ...
+    def write(self, data: bytes) -> None: ...
+    def set_reader(self, on_bytes: Optional[BytesCallback]) -> None: ...
+    def is_open(self) -> bool: ...

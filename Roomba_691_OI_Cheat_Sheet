@@ -1,0 +1,89 @@
+Roomba 691 OI Cheat Sheet (Developer View)
+Serial & Modes (quick)
+
+Port: 115200 baud, 8N1, no flow control.
+
+Wake/handshake:
+
+80 = START (Passive, sensors only)
+
+83 = SAFE (recommended for dev; drive + protections)
+
+84 = FULL (no protections—use only on a stand)
+
+Query mode: 8E 23 → reply 1 byte: 01=Passive, 02=Safe, 03=Full
+
+Stop stream (if you see constant noise): 96 00
+
+LEDS command (opcode 139 / 0x8B)
+
+Frame: [139] [LED_BITS] [POWER_COLOR] [POWER_INTENSITY]
+
+LED_BITS (bitfield):
+
+bit0 = Debris (blue) — right, above CLEAN
+
+bit1 = Spot (green) — left, above CLEAN
+
+bit2 = Dock/Home (green) — below CLEAN, house icon
+
+bit3 = Check Robot (orange) — center dot above CLEAN
+
+POWER_COLOR (0..255): 0=green → 255=red (128 ≈ orange/yellow)
+
+POWER_INTENSITY (0..255): 0=off → 255=full bright
+
+Panel map (top view of the 691 face)
+      [ Spot (bit1) ]   [ Check (bit3 •) ]   [ Debris (bit0) ]
+                      (above CLEAN)
+
+                 ┌───────────────┐
+                 │   CLEAN       │  ← Power LED ring (color+brightness)
+                 └───────────────┘
+
+                      [ Dock/Home (bit2) ]  (below CLEAN, house icon)
+
+Minimal test sequences (copy these hex bytes)
+Verify each small LED
+
+Debris (blue, right-top): 8B 01 00 00
+
+Spot (green, left-top): 8B 02 00 00
+
+Dock/Home (green, below): 8B 04 00 00
+
+Check Robot (orange, dot): 8B 08 00 00
+
+Power LED ring (Battery indicator LED) 
+
+Green full: 8B 00 00 FF
+
+Red full: 8B 00 FF FF
+
+Orange half: 8B 00 80 80
+
+All four small LEDs on (sanity)
+
+8B 0F 00 FF (bits 0–3 on, power ring bright green)
+
+Drive (quick reference)
+
+DRIVE (137 / 0x89): [89][vel_hi][vel_lo][rad_hi][rad_lo]
+
+Example forward 200 mm/s, straight: 89 00 C8 00 00
+
+Stop: 89 00 00 00 00
+
+DRIVE_DIRECT (145 / 0x91): [91][right_hi][right_lo][left_hi][left_lo]
+
+Safe test routine (recommended)
+
+80 (START), wait 200–300 ms
+
+83 (SAFE), wait 200–300 ms
+
+Optional: 96 00 (pause any stream)
+
+Send LED/Drive tests above
+
+Query mode anytime: 8E 23 → expect 02 in SAFE
