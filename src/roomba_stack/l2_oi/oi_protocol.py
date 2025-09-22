@@ -15,7 +15,7 @@ Reference: iRobot Create 2 / Roomba 600 Open Interface Specification
 """
 
 from enum import IntEnum
-from construct import Struct, Int8ub, Int16sb, Int16ub, BitStruct, Flag, Padding, BitsInteger, Adapter
+from construct import Struct, Int8ub, Int16sb, Int16ub, BitStruct, Flag, Padding, Adapter, Enum
 
 # ============================================================
 # OI Command Opcodes (TX)
@@ -56,7 +56,7 @@ class Opcode(IntEnum):
 class _P7Adapter(Adapter):
     """Adapter that decodes packet 7 bitfields into named booleans."""
     def _decode(self, obj, ctx, path):
-        b = obj & 0xFF
+        b = obj & 0x0F
         return {
             "bump_right":       bool(b & 0x01),  # bit0
             "bump_left":        bool(b & 0x02),  # bit1
@@ -83,10 +83,58 @@ Packet10_CliffFrontLeft  = Struct("cliff_front_left" / Int8ub)
 Packet11_CliffFrontRight = Struct("cliff_front_right" / Int8ub)
 Packet12_CliffRight      = Struct("cliff_right" / Int8ub)
 Packet13_VirtualWall     = Struct("virtual_wall" / Int8ub)      # 0 = none, 1 = detected
-Packet14_WheelOvercurrents = Struct("wheel_overcurrents" / Int8ub)  # bitmask, 0–31
+class _P14Adapter(Adapter):
+    """Adapter that decodes packet 14 bitfields into named booleans."""
+    def _decode(self, obj, ctx, path):
+        b = obj & 0x1F
+        return {
+            "side_brush":       bool(b & 0x01),  # bit0 
+            "reserved_bit1":    bool(b & 0x02),  # bit1 
+            "main_brush":       bool(b & 0x04),  # bit2 
+            "right_wheel":      bool(b & 0x08),  # bit3
+            "left_wheel":       bool(b & 0x10),  # bit4 
+        }
+    def _encode(self, obj, ctx, path):
+        v = 0
+        if obj.get("side_brush"):       v |= 0x01
+        if obj.get("reserved_bit1"):    v |= 0x02
+        if obj.get("main_brush"):       v |= 0x04
+        if obj.get("right_wheel"):      v |= 0x08
+        if obj.get("left_wheel"):       v |= 0x10
+        return v
+Packet14_WheelOvercurrents = _P14Adapter(Int8ub)
+"""Construct schema for packet 14 (wheel overcurrents status)."""
+
 Packet15_DirtDetect      = Struct("dirt_detect" / Int8ub)       # dirt sensor value
 Packet17_IRCharOmni      = Struct("ir_char_omni" / Int8ub)      # IR opcode seen by omni receiver
-Packet18_Buttons         = Struct("buttons" / Int8ub)           # button bitmask (0–255)
+
+class _P18Adapter(Adapter):
+    """Adapter that decodes packet 18 bitfields into named booleans."""
+    def _decode(self, obj, ctx, path):
+        b = obj & 0xFF
+        return {
+            "clean":        bool(b & 0x01),  # bit0 
+            "spot":         bool(b & 0x02),  # bit1 
+            "dock":         bool(b & 0x04),  # bit2 
+            "minute":       bool(b & 0x08),  # bit3
+            "hour":         bool(b & 0x10),  # bit4
+            "day":          bool(b & 0x20),  # bit5
+            "schedule":     bool(b & 0x40),  # bit6
+            "clock":        bool(b & 0x80),  # bit7 
+        }
+    def _encode(self, obj, ctx, path):
+        v = 0
+        if obj.get("clean"):        v |= 0x01
+        if obj.get("spot"):         v |= 0x02
+        if obj.get("dock"):         v |= 0x04
+        if obj.get("minute"):       v |= 0x08
+        if obj.get("hour"):         v |= 0x10
+        if obj.get("day"):          v |= 0x20
+        if obj.get("schedule"):     v |= 0x40
+        if obj.get("clock"):        v |= 0x80
+        return v
+Packet18_Buttons = _P18Adapter(Int8ub)
+"""Construct schema for packet 18 (The state of the Roomba buttons)."""
 
 # Odometry
 Packet19_Distance        = Struct("distance_mm" / Int16sb)      # Signed mm since last request
@@ -111,7 +159,31 @@ Packet31_CliffRightSignal    = Struct("cliff_right_signal" / Int16ub)
 
 # Charging sources & mode
 Packet34_ChargingSources = Struct("charging_sources" / Int8ub)  # bits: home base, internal
-Packet35_OIMode          = Struct("oi_mode" / Int8ub)           # 0=Off, 1=Passive, 2=Safe, 3=Full
+
+# ============================================================
+# OI Command Opcodes (TX)
+# Modes overview (spec):
+# - OFF (0): OI inactive. Most commands ignored. After power/reset, send START.
+# - PASSIVE (1): After START, robot accepts most read-only commands (sensors, song),
+#   but no actuators (drive, motors). Transition into PASSIVE happens on START.
+# - SAFE (2): After SAFE, robot accepts drive/actuator commands with safety constraints.
+# - FULL (3): After FULL, robot accepts drive/actuator commands without safety limits.
+#
+# Transitions (spec highlights):
+# - START (128) -> PASSIVE
+# - SAFE (131)  -> SAFE (from PASSIVE or FULL)
+# - FULL (132)  -> FULL (from PASSIVE or SAFE)
+# - POWER/RESET may drop to OFF; send START again to re-enter PASSIVE.
+# ============================================================
+Packet35_OIMode = Struct(                                       # The current OI mode
+    "oi_mode" / Enum(Int8ub,
+        OFF=0,        # 0
+        PASSIVE=1,    # 1
+        SAFE=2,       # 2
+        FULL=3,       # 3
+    )
+)
+
 Packet36_SongNumber      = Struct("song_number" / Int8ub)
 Packet37_SongPlaying     = Struct("song_playing" / Int8ub)      # 0 = no, 1 = yes
 Packet38_NumStreamPkts   = Struct("num_stream_packets" / Int8ub)
@@ -225,6 +297,27 @@ def parse_sensor(packet_id: int, raw: bytes):
     if not schema:
         return {"raw": raw.hex()}
     return schema.parse(raw)
+
+def build_sensor(packet_id: int, payload: dict) -> bytes:
+    """
+    Build raw payload bytes for a sensor packet.
+
+    Args:
+        packet_id: Numeric packet identifier defined by the OI spec.
+        payload: Mapping of field names to values compatible with the schema.
+
+    Returns:
+        Raw payload bytes (no leading packet ID).
+    """
+    schema = SENSOR_PACKETS.get(packet_id)
+    if not schema:
+        raise ValueError(f"Unknown or unsupported packet ID {packet_id}")
+    try:
+        return schema.build(payload)
+    except Exception as exc:  # pragma: no cover - construct raises many types
+        raise ValueError(
+            f"Failed to build sensor packet {packet_id} with payload {payload}: {exc}"
+        ) from exc
 
 def packet_length(packet_id: int) -> int:
     """

@@ -51,6 +51,8 @@ Available Commands:
   stream ids   - Start continuous streaming of packets
                  Example: stream 1 7
   stop_stream  - Stop continuous streaming (opcode 150 / 0x96)
+  mode          - Read OI mode (packet 35). Values: 0=OFF, 1=PASSIVE, 2=SAFE, 3=FULL.
+                 Note: START puts the robot into PASSIVE. Use SAFE or FULL to enable driving.
 
   help         - Show this help menu
   quit         - Exit CLI
@@ -104,8 +106,12 @@ def main():
                     packet_id = int(parts[1])
                 else:
                     packet_id = 0  # all sensors
-                parsed = svc.get_sensor(packet_id)
-                print(f"[TX] Requested sensor {packet_id} → {parsed}")
+                try:
+                    parsed = svc.get_sensor(packet_id)
+                except TimeoutError:
+                    print(f"[WARN] Sensor packet {packet_id} not received (timeout)")
+                else:
+                    print(f"[TX] Requested sensor {packet_id} → {parsed}")
             elif cmd.startswith("stream"):
                 # Example: stream 1 7
                 parts = cmd.split()
@@ -115,6 +121,29 @@ def main():
                 else:
                     svc.start_stream(ids)
                     print(f"[TX] Streaming packets: {ids}")
+            elif cmd == "mode":
+                try:
+                    parsed = svc.get_sensor(35)
+                except TimeoutError:
+                    print("[WARN] OI mode packet not received (timeout)")
+                else:
+                    mode_value = None
+                    if hasattr(parsed, "get"):
+                        mode_value = parsed.get("oi_mode")
+                    if mode_value is None:
+                        mode_value = getattr(parsed, "oi_mode", None)
+                    if mode_value is None:
+                        mode_value = parsed
+                    try:
+                        mode_int = int(mode_value)
+                    except (TypeError, ValueError):
+                        mode_int = None
+                    mode_names = {0: "Off", 1: "Passive", 2: "Safe", 3: "Full"}
+                    if mode_int is not None:
+                        mode_label = mode_names.get(mode_int, "Unknown")
+                        print(f"[TX] OI mode → {mode_int} ({mode_label})")
+                    else:
+                        print(f"[TX] OI mode → {mode_value}")
             elif cmd == "stop_stream":
                 svc.stop_stream()
                 print("[TX] Stop sensor stream")
