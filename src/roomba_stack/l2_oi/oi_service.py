@@ -24,13 +24,29 @@ Usage:
 """
 
 import time
+import logging
 from typing import Callable, Optional
+import threading
 
 from roomba_stack.l1_drivers.pyserial_port import PySerialPort
 from . import oi_codec
 from . import oi_decode
 from . import oi_protocol
 from .oi_protocol import Opcode
+from l2_oi.protocol_queue import BoundedQueue
+
+QUEUE_DISPATCHER = True
+
+RX_QUEUE_MAX = 4096
+TX_QUEUE_MAX = 256
+Q_PUT_TIMEOUT = 0.01
+Q_GET_TIMEOUT = 0.10
+
+# Guard: RX callback must remain enqueue-only (no parsing here)
+ENQUEUE_ONLY_RX = True
+
+
+log = logging.getLogger(__name__)
 
 
 class OIService:
@@ -50,18 +66,73 @@ class OIService:
         # Track currently pending single packet request
         self._pending_request_id: Optional[int] = None
 
+        # Bounded queues for RX bytes and TX frames
+        self._rx_bytes = BoundedQueue(RX_QUEUE_MAX, "RxByteQueue")
+        self._tx_frames = BoundedQueue(TX_QUEUE_MAX, "TxFrameQueue")
+        
+        self._dispatcher_thread = None
+        self._running = False
+        self._rx_buf = bytearray()
+        
+
     # ------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------
 
     def open(self) -> None:
         """Open the serial connection and start RX thread."""
-        self._port.set_reader(self._rx_handler)
+        if QUEUE_DISPATCHER:
+            self._running = True
+            self._dispatcher_thread = threading.Thread(
+                target=self._dispatcher_loop, name="dispatcher", daemon=True
+            )
+            self._dispatcher_thread.start()
+            self._port.set_reader(self._on_serial_bytes)
+        else:
+            self._port.set_reader(self._rx_handler)
         self._port.open()
 
     def close(self) -> None:
-        """Close the serial connection."""
+        """
+        Gracefully stop the dispatcher and close the serial connection.
+
+        Behavior:
+        - Signals the dispatcher loop to stop by setting `_running = False`.
+        - Unregisters the serial reader to prevent late callbacks after shutdown starts.
+        - Joins the dispatcher thread with a bounded timeout (0.5s) if it's alive
+            and not the current thread (avoids self-join deadlock).
+        - Closes the serial port last.
+
+        Notes:
+        - Idempotent: safe to call multiple times.
+        - Ordering matters: stop -> unregister reader -> join -> close port.
+        - Any exceptions during unregistering or joining are caught and logged.
+        """
+        # 1) Tell the dispatcher loop to exit on its next iteration.
+        was_running = self._running
+        self._running = False
+
+        # 2) Best-effort: unregister the reader so no more callbacks arrive.
+        try:
+            self._port.set_reader(None)
+        except Exception:
+            # Reader may already be cleared or port may be mid-shutdown.
+            log.exception("Error while unregistering serial reader")
+
+        # 3) If we had a running dispatcher, try to join it (but never self-join).
+        t = self._dispatcher_thread
+        if was_running and t and t.is_alive() and t is not threading.current_thread():
+            try:
+                t.join(timeout=0.5)
+            except Exception:
+                log.exception("Error while joining dispatcher thread")
+
+        self._dispatcher_thread = None
+        log.info("Dispatcher thread stopped")
+
+        # 4) Close the serial port last to release the device and file descriptors.
         self._port.close()
+
 
     # ------------------------------------------------------------
     # Control Commands
@@ -225,3 +296,137 @@ class OIService:
     def set_on_sensor(self, cb: Callable[[int, object], None]) -> None:
         """Register a callback for sensor updates."""
         self._on_sensor = cb
+        
+    def _on_serial_bytes(self, data: bytes) -> None:
+        """Callback from PySerialPort with incoming bytes."""
+        if not data:
+            return
+        ok = self._rx_bytes.put(data, timeout=Q_PUT_TIMEOUT)
+        if not ok:
+            log.warning("[%s] overflow: dropped %d bytes", self._rx_bytes.name(), len(data))
+
+    def _dispatcher_loop(self) -> None:
+        """Background thread to dispatch RX bytes"""
+        log.info("Dispatcher thread started")
+        while self._running:
+            ok, chunk = self._rx_bytes.get(timeout=Q_GET_TIMEOUT)
+            if not ok:
+                continue    # timed wait; no busy spin
+            self._rx_buf.extend(chunk)
+            self._decode_available_frames()
+   
+    def _deliver(self, pid: int, parsed: object) -> None:
+        self._latest_packets[pid] = parsed
+        if self._on_sensor:
+            try:
+                self._on_sensor(pid, parsed)
+            except Exception:
+                log.exception("on_sensor callback error")
+             
+
+    def _decode_available_frames(self) -> None:
+        """
+        Consume and decode as many complete frames as available in `_rx_buf`.
+
+        Overview
+        - Runs only on the dispatcher thread; `_rx_buf` is append-only elsewhere.
+        - Incremental parsing: when a complete frame is decoded, its bytes are
+          removed from `_rx_buf`. If incomplete, the loop exits to await more RX.
+        - Fast resync: on malformed frames or parse errors, drop one byte.
+
+        Supported inputs
+        1) Stream frame (opcode 148 reply)
+           Bytes: [0x13][N][payload...][checksum]
+           - 0x13: stream header
+           - N: payload length in bytes (does NOT include header/len/checksum)
+           - payload: concatenation of [packet_id][packet_payload] for one or
+             more sensor packets
+           - checksum: sum(header + N + payload + checksum) & 0xFF == 0
+
+           Example (IDs 7 and 19):
+           - Packet 7 (1 byte) = 0x03
+           - Packet 19 (2 bytes) = 0x00 0x78 (distance = 120)
+           - payload = 07 03 13 00 78  → N = 0x05
+           - frame without checksum = 13 05 07 03 13 00 78  (sum = 0xAD)
+           - checksum = (-0xAD) & 0xFF = 0x53
+           - full frame = 13 05 07 03 13 00 78 53
+
+        2) Single packet reply (opcode 142 request)
+           Bytes: [raw payload only], length determined by the schema of the
+           `_pending_request_id`. No packet ID byte and no checksum.
+           Examples:
+           - Request 7 → 1 byte: 05
+           - Request 19 → 2 bytes: 00 78
+
+        Not implemented here (future work)
+        - Query List (opcode 149) combined replies. If needed, add explicit
+          request tracking and parsing for multi-packet responses.
+        """
+
+        while True:
+            # Nothing buffered: done for now
+            if not self._rx_buf:
+                break
+
+            b0 = self._rx_buf[0]
+
+            # Case A: Stream frame (0x13 header)
+            if b0 == 0x13:
+                # Need at least header + len + checksum
+                if len(self._rx_buf) < 3:
+                    break  # wait for more
+                n = self._rx_buf[1]
+                if n > 128:  # sanity cap for stream payload length
+                    log.warning("Stream len insane (%d), resync drop 1", n)
+                    del self._rx_buf[0]
+                    continue
+                total = 2 + n + 1
+                if len(self._rx_buf) < total:
+                    break  # incomplete frame
+                frame = bytes(self._rx_buf[:total])
+                try:
+                    results = oi_decode.decode_stream_frame(frame)
+                except ValueError:
+                    # Bad checksum or malformed
+                    log.warning("RX resync: dropping 1 byte (buf=%d)", len(self._rx_buf))
+                    del self._rx_buf[0]
+                    continue
+
+                # Deliver parsed packets
+                for pid, parsed in results.items():
+                    self._deliver(pid, parsed)
+
+                # Consume the frame
+                del self._rx_buf[:total]
+                continue
+
+            # Case B: Pending single packet reply (opcode 142 response is raw payload only)
+            if self._pending_request_id is not None:
+                pid = self._pending_request_id
+                expected_len = oi_protocol.packet_length(pid)
+                if expected_len <= 0:
+                    # Unknown length → drop one byte to avoid deadlock
+                    log.warning("Unknown length for pid=%d; resync drop 1 (buf=%d)", pid, len(self._rx_buf))
+                    del self._rx_buf[0]
+                    continue
+                if len(self._rx_buf) < expected_len:
+                    break  # need more bytes
+
+                raw = bytes(self._rx_buf[:expected_len])
+                try:
+                    parsed = oi_decode.decode_sensor(pid, raw)
+                except Exception:
+                    # Parsing failed → drop 1 byte and retry/resync
+                    log.warning("Decode failed for pid=%d; resync drop 1 (buf=%d)", pid, len(self._rx_buf))
+                    del self._rx_buf[0]
+                    continue
+
+                self._deliver(pid, parsed)
+                del self._rx_buf[:expected_len]
+                self._pending_request_id = None
+                continue
+
+            # Case C: Unknown/unexpected leading byte → drop to resync quickly
+            log.warning("RX resync: dropping 1 byte (buf=%d)", len(self._rx_buf))
+            del self._rx_buf[0]
+            continue
