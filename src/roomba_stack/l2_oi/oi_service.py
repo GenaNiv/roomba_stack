@@ -27,6 +27,7 @@ import time
 import logging
 from typing import Callable, Optional
 import threading
+import re
 
 from roomba_stack.l1_drivers.pyserial_port import PySerialPort
 from . import oi_codec
@@ -46,12 +47,19 @@ Q_GET_TIMEOUT = 0.10
 ENQUEUE_ONLY_RX = True
 
 # Feature flags / diagnostics (dev-only)
-DEBUG_RAW_UNKNOWN = True   # dump unknown-leading bytes (HEX + ASCII) for diagnosis
+DEBUG_RAW_UNKNOWN = False   # dump unknown-leading bytes (HEX + ASCII) for diagnosis
 RAW_DUMP_HEAD     = 48     # how many bytes of the buffer front to show
 
 ASCII_SNIFF       = True   # treat printable text as ASCII lines (no resync spam)
 ASCII_MAX         = 80     # cap per-line capture
 
+PID_ASCII_GENERIC = -100     # plain text line
+PID_ASCII_BATSTAT = -101     # parsed battery/status line
+
+_ASCII_BAT_RE = re.compile(
+    r"^bat:\s+min\s+(?P<min>\d+)\s+sec\s+(?P<sec>\d+)\s+mV\s+(?P<mv>\d+)\s+mA\s+(?P<ma>-?\d+)\s+rx-byte\s+(?P<rx>\d+)\s+mAH\s+(?P<mah>\d+)\s+state\s+(?P<state>\d+)\s+mode\s+(?P<mode>\d+)",
+    re.IGNORECASE,
+)
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +88,9 @@ class OIService:
         self._dispatcher_thread = None
         self._running = False
         self._rx_buf = bytearray()
+        
+        self._ascii_accum = bytearray()
+
         
 
     # ------------------------------------------------------------
@@ -436,21 +447,42 @@ class OIService:
 
             # ASCII pre-filter (dev)
             if ASCII_SNIFF and self._is_printable(b0):
-                # look for EOL
+                # accumulate printable run until EOL or MAX
                 eol = self._find_eol(self._rx_buf)
-                cut = eol if eol != -1 else min(len(self._rx_buf), ASCII_MAX)
-                line = bytes(self._rx_buf[:cut])
-                # log both HEX and ASCII for visibility
-                if DEBUG_RAW_UNKNOWN:
-                    log.warning("[ASCII] HEX: %s", line.hex())
-                    try:
+                if eol == -1:
+                    # no full line yet: move a chunk (bounded) to accum and wait
+                    take = min(len(self._rx_buf), ASCII_MAX - len(self._ascii_accum))
+                    self._ascii_accum.extend(self._rx_buf[:take])
+                    del self._rx_buf[:take]
+                    # if we hit the cap, flush as one line
+                    if len(self._ascii_accum) >= ASCII_MAX:
+                        line = bytes(self._ascii_accum); self._ascii_accum.clear()
                         preview = self._ascii_preview(line)
-                    except Exception:
-                        preview = "<ascii preview error>"
-                    log.warning("[ASCII] TEXT: %s", preview)
-                # consume the captured bytes and continue
-                del self._rx_buf[:cut]
-                continue
+                        parsed = self._parse_ascii_line(preview)
+                        if parsed:
+                            pid, payload = parsed; self._deliver(pid, payload)
+                        else:
+                            self._deliver(PID_ASCII_GENERIC, preview)
+                        if DEBUG_RAW_UNKNOWN:
+                            log.warning("[ASCII] HEX: %s", line.hex())
+                            log.warning("[ASCII] TEXT: %s", preview)
+                    # otherwise, wait for more bytes
+                    continue
+                else:
+                    # we have a full line ending at 'eol'
+                    self._ascii_accum.extend(self._rx_buf[:eol])
+                    del self._rx_buf[:eol]
+                    line = bytes(self._ascii_accum); self._ascii_accum.clear()
+                    preview = self._ascii_preview(line)
+                    parsed = self._parse_ascii_line(preview)
+                    if parsed:
+                        pid, payload = parsed; self._deliver(pid, payload)
+                    else:
+                        self._deliver(PID_ASCII_GENERIC, preview)
+                    if DEBUG_RAW_UNKNOWN:
+                        log.warning("[ASCII] HEX: %s", line.hex())
+                        log.warning("[ASCII] TEXT: %s", preview)
+                    continue
 
 
             # Case C: Unknown/unexpected leading byte → drop to resync quickly
@@ -478,3 +510,14 @@ class OIService:
         for b in data:
             out.append(chr(b) if 32 <= b <= 126 else '.')
         return ''.join(out)
+
+    def _parse_ascii_line(self, text: str):
+        """
+        Try to parse known ASCII status lines.
+        Returns (pid, payload) or None if not recognized.
+        """
+        m = _ASCII_BAT_RE.match(text.strip())
+        if m:
+            d = {k: int(v) for k, v in m.groupdict().items()}
+            return (PID_ASCII_BATSTAT, d)
+        return None

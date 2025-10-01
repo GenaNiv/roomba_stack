@@ -18,13 +18,31 @@ Features:
 import argparse
 import time
 from roomba_stack.l2_oi.oi_service import OIService
+from roomba_stack.l2_oi.oi_service import PID_ASCII_GENERIC, PID_ASCII_BATSTAT
 
+MODE_NAMES = {0:"Off", 1:"Passive", 2:"Safe", 3:"Full"}
 
 def rx_logger(packet_id: int, parsed: object) -> None:
     """
-    RX callback: logs parsed sensor updates.
+    RX callback: logs parsed sensor updates and ASCII events.
     """
-    print(f"[RX] Packet {packet_id}: {parsed}")
+    if packet_id == PID_ASCII_BATSTAT:
+        # parsed is a dict with keys: min, sec, mv, ma, rx, mah, state, mode
+        try:
+            mode_n = parsed.get("mode")
+            mode_s = MODE_NAMES.get(mode_n, str(mode_n))
+            print("[ASCII.BAT] "
+                  f"min={parsed['min']} sec={parsed['sec']} "
+                  f"mv={parsed['mv']} ma={parsed['ma']} "
+                  f"rx={parsed['rx']} mah={parsed['mah']} "
+                  f"state={parsed['state']} mode={mode_s}")
+        except Exception:
+            print(f"[ASCII.BAT] {parsed}")
+    elif packet_id == PID_ASCII_GENERIC:
+        # parsed is the raw text line
+        print(f"[ASCII.TEXT] {parsed}")
+    else:
+        print(f"[RX] Packet {packet_id}: {parsed}")
 
 
 def print_help() -> None:
