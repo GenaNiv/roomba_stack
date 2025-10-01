@@ -65,7 +65,6 @@ _ASCII_BAT_RE = re.compile(
 TX_INTER_CMD_DELAY = 0.02  # 20ms between commands (tune/disable as needed)
 SENTINEL = object()        # sentinel to wake the TX writer during shutdown
 
-
 log = logging.getLogger(__name__)
 
 
@@ -692,7 +691,7 @@ class OIService:
             log.warning("RX resync: dropping 1 byte (buf=%d)", len(self._rx_buf))
             del self._rx_buf[0]
             continue
-
+        
     def _is_printable(self, b: int) -> bool:
         return 32 <= b <= 126 or b in (9,)  # tab allowed
     
@@ -724,7 +723,8 @@ class OIService:
             d = {k: int(v) for k, v in m.groupdict().items()}
             return (PID_ASCII_BATSTAT, d)
         return None
-    # --- new: TX helpers at class scope ---
+
+    # --- TX helpers (single writer owns serial TX) ---
     def _send(self, frame: bytes) -> None:
         """Enqueue a command frame to be written by the TX writer thread."""
         if not frame:
@@ -754,3 +754,26 @@ class OIService:
             if TX_INTER_CMD_DELAY:
                 time.sleep(TX_INTER_CMD_DELAY)
         log.info("TX writer exiting")
+
+
+    def _is_printable(self, b: int) -> bool:
+        return 32 <= b <= 126 or b in (9,)  # tab allowed
+    
+    def _find_eol(self, buf: bytearray) -> int:
+        # return index after CRLF/LF/CR if present; else -1
+        for i, v in enumerate(buf):
+            if v in (10, 13):  # LF or CR
+                # swallow a paired CRLF/LFCR if present
+                j = i + 1
+                if j < len(buf) and buf[j] in (10, 13) and buf[j] != v:
+                    return j + 1
+                return i + 1
+        return -1
+    
+    def _ascii_preview(self, data: bytes) -> str:
+        """Return a printable preview: ASCII printable as-is, others as '.'"""
+        out = []
+        for b in data:
+            out.append(chr(b) if 32 <= b <= 126 else '.')
+        return ''.join(out)
+
