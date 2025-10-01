@@ -33,7 +33,7 @@ from . import oi_codec
 from . import oi_decode
 from . import oi_protocol
 from .oi_protocol import Opcode
-from l2_oi.protocol_queue import BoundedQueue
+from .protocol_queue import BoundedQueue
 
 QUEUE_DISPATCHER = True
 
@@ -44,6 +44,13 @@ Q_GET_TIMEOUT = 0.10
 
 # Guard: RX callback must remain enqueue-only (no parsing here)
 ENQUEUE_ONLY_RX = True
+
+# Feature flags / diagnostics (dev-only)
+DEBUG_RAW_UNKNOWN = True   # dump unknown-leading bytes (HEX + ASCII) for diagnosis
+RAW_DUMP_HEAD     = 48     # how many bytes of the buffer front to show
+
+ASCII_SNIFF       = True   # treat printable text as ASCII lines (no resync spam)
+ASCII_MAX         = 80     # cap per-line capture
 
 
 log = logging.getLogger(__name__)
@@ -184,7 +191,8 @@ class OIService:
 
         # Determine expected reply length
         expected_len = oi_protocol.packet_length(packet_id)
-        print("DEBUG: packet_length(", packet_id, ") =", expected_len)
+        log.debug("packet_length(%d) = %d", packet_id, expected_len)
+
         if expected_len <= 0:
             raise ValueError(f"Unknown or unsupported packet ID {packet_id}")
 
@@ -426,7 +434,47 @@ class OIService:
                 self._pending_request_id = None
                 continue
 
+            # ASCII pre-filter (dev)
+            if ASCII_SNIFF and self._is_printable(b0):
+                # look for EOL
+                eol = self._find_eol(self._rx_buf)
+                cut = eol if eol != -1 else min(len(self._rx_buf), ASCII_MAX)
+                line = bytes(self._rx_buf[:cut])
+                # log both HEX and ASCII for visibility
+                if DEBUG_RAW_UNKNOWN:
+                    log.warning("[ASCII] HEX: %s", line.hex())
+                    try:
+                        preview = self._ascii_preview(line)
+                    except Exception:
+                        preview = "<ascii preview error>"
+                    log.warning("[ASCII] TEXT: %s", preview)
+                # consume the captured bytes and continue
+                del self._rx_buf[:cut]
+                continue
+
+
             # Case C: Unknown/unexpected leading byte → drop to resync quickly
             log.warning("RX resync: dropping 1 byte (buf=%d)", len(self._rx_buf))
             del self._rx_buf[0]
             continue
+
+    def _is_printable(self, b: int) -> bool:
+        return 32 <= b <= 126 or b in (9,)  # tab allowed
+    
+    def _find_eol(self, buf: bytearray) -> int:
+        # return index after CRLF/LF/CR if present; else -1
+        for i, v in enumerate(buf):
+            if v in (10, 13):  # LF or CR
+                # swallow a paired CRLF/LFCR if present
+                j = i + 1
+                if j < len(buf) and buf[j] in (10, 13) and buf[j] != v:
+                    return j + 1
+                return i + 1
+        return -1
+    
+    def _ascii_preview(self, data: bytes) -> str:
+        """Return a printable preview: ASCII printable as-is, others as '.'"""
+        out = []
+        for b in data:
+            out.append(chr(b) if 32 <= b <= 126 else '.')
+        return ''.join(out)
