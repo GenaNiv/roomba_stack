@@ -97,6 +97,8 @@ class OIService:
         self._ascii_accum = bytearray()
 
         self._tx_thread = None
+        self._ascii_accum = bytearray()
+
         
 
     # ------------------------------------------------------------
@@ -776,4 +778,15 @@ class OIService:
         for b in data:
             out.append(chr(b) if 32 <= b <= 126 else '.')
         return ''.join(out)
+
+    def _parse_ascii_line(self, text: str):
+        """
+        Try to parse known ASCII status lines.
+        Returns (pid, payload) or None if not recognized.
+        """
+        m = _ASCII_BAT_RE.match(text.strip())
+        if m:
+            d = {k: int(v) for k, v in m.groupdict().items()}
+            return (PID_ASCII_BATSTAT, d)
+        return None
 
