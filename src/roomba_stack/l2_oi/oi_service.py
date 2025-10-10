@@ -97,6 +97,7 @@ class OIService:
         self._ascii_accum = bytearray()  # for accumulating ASCII lines
         self._tx_thread = None
 
+        self._tx_thread = None
         
 
     # ------------------------------------------------------------
@@ -686,12 +687,12 @@ class OIService:
                         log.warning("[ASCII] TEXT: %s", preview)
                     continue
 
-
             # Case C: Unknown/unexpected leading byte → drop to resync quickly
             log.warning("RX resync: dropping 1 byte (buf=%d)", len(self._rx_buf))
             del self._rx_buf[0]
             continue
-        
+
+
     def _is_printable(self, b: int) -> bool:
         return 32 <= b <= 126 or b in (9,)  # tab allowed
     
@@ -724,6 +725,51 @@ class OIService:
             return (PID_ASCII_BATSTAT, d)
         return None
 
+    # --- new: TX helpers at class scope ---
+    def _send(self, frame: bytes) -> None:
+        """Enqueue a command frame to be written by the TX writer thread."""
+        if not frame:
+            return
+        if not self._alive.is_set():
+            log.debug("drop TX while not alive (len=%d)", len(frame))
+            return
+        ok = self._tx_frames.put(frame, timeout=Q_PUT_TIMEOUT)
+        if not ok:
+            log.warning("[TxFrameQueue] overflow: dropped frame len=%d", len(frame))
+
+    def _tx_writer_loop(self) -> None:
+        """Single writer that owns serial TX to avoid interleaving from many callers."""
+        log.info("TX writer started")
+        while True:
+            ok, item = self._tx_frames.get(timeout=Q_GET_TIMEOUT)
+            if not ok:
+                if not self._alive.is_set():
+                    break
+                continue
+            if item is SENTINEL or not self._alive.is_set():
+                break
+            try:
+                self._port.write(item)
+            except Exception:
+                log.exception("TX write failed")
+            if TX_INTER_CMD_DELAY:
+                time.sleep(TX_INTER_CMD_DELAY)
+        log.info("TX writer exiting")
+
+    def _is_printable(self, b: int) -> bool:
+        return 32 <= b <= 126 or b in (9,)  # tab allowed
+    
+    def _find_eol(self, buf: bytearray) -> int:
+        # return index after CRLF/LF/CR if present; else -1
+        for i, v in enumerate(buf):
+            if v in (10, 13):  # LF or CR
+                # swallow a paired CRLF/LFCR if present
+                j = i + 1
+                if j < len(buf) and buf[j] in (10, 13) and buf[j] != v:
+                    return j + 1
+                return i + 1
+        return -1
+    
     # --- TX helpers (single writer owns serial TX) ---
     def _send(self, frame: bytes) -> None:
         """Enqueue a command frame to be written by the TX writer thread."""
