@@ -94,10 +94,8 @@ class OIService:
         self._alive.clear()
         self._rx_buf = bytearray()
         
-        self._ascii_accum = bytearray()
-
+        self._ascii_accum = bytearray()  # for accumulating ASCII lines
         self._tx_thread = None
-        self._ascii_accum = bytearray()
 
         
 
@@ -758,35 +756,4 @@ class OIService:
         log.info("TX writer exiting")
 
 
-    def _is_printable(self, b: int) -> bool:
-        return 32 <= b <= 126 or b in (9,)  # tab allowed
-    
-    def _find_eol(self, buf: bytearray) -> int:
-        # return index after CRLF/LF/CR if present; else -1
-        for i, v in enumerate(buf):
-            if v in (10, 13):  # LF or CR
-                # swallow a paired CRLF/LFCR if present
-                j = i + 1
-                if j < len(buf) and buf[j] in (10, 13) and buf[j] != v:
-                    return j + 1
-                return i + 1
-        return -1
-    
-    def _ascii_preview(self, data: bytes) -> str:
-        """Return a printable preview: ASCII printable as-is, others as '.'"""
-        out = []
-        for b in data:
-            out.append(chr(b) if 32 <= b <= 126 else '.')
-        return ''.join(out)
-
-    def _parse_ascii_line(self, text: str):
-        """
-        Try to parse known ASCII status lines.
-        Returns (pid, payload) or None if not recognized.
-        """
-        m = _ASCII_BAT_RE.match(text.strip())
-        if m:
-            d = {k: int(v) for k, v in m.groupdict().items()}
-            return (PID_ASCII_BATSTAT, d)
-        return None
 
