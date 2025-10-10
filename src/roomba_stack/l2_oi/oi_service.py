@@ -33,7 +33,7 @@ from . import oi_codec
 from . import oi_decode
 from . import oi_protocol
 from .oi_protocol import Opcode
-from l2_oi.protocol_queue import BoundedQueue
+from .protocol_queue import BoundedQueue
 
 QUEUE_DISPATCHER = True
 
@@ -45,6 +45,10 @@ Q_GET_TIMEOUT = 0.10
 # Guard: RX callback must remain enqueue-only (no parsing here)
 ENQUEUE_ONLY_RX = True
 
+TX_INTER_CMD_DELAY = 0.02  # 20ms between commands (tune/disable as needed)
+
+# optional: a sentinel to wake the writer during shutdown
+SENTINEL = object()
 
 log = logging.getLogger(__name__)
 
@@ -71,8 +75,11 @@ class OIService:
         self._tx_frames = BoundedQueue(TX_QUEUE_MAX, "TxFrameQueue")
         
         self._dispatcher_thread = None
-        self._running = False
+        self._alive = threading.Event()   # service-level on/off
+        self._alive.clear()
         self._rx_buf = bytearray()
+        
+        self._tx_thread = None
         
 
     # ------------------------------------------------------------
@@ -80,9 +87,9 @@ class OIService:
     # ------------------------------------------------------------
 
     def open(self) -> None:
-        """Open the serial connection and start RX thread."""
+        """Open the serial connection and start RX/TX threads."""
         if QUEUE_DISPATCHER:
-            self._running = True
+            self._alive.set()
             self._dispatcher_thread = threading.Thread(
                 target=self._dispatcher_loop, name="dispatcher", daemon=True
             )
@@ -90,6 +97,13 @@ class OIService:
             self._port.set_reader(self._on_serial_bytes)
         else:
             self._port.set_reader(self._rx_handler)
+            
+        # start TX writer thread
+        self._tx_thread = threading.Thread(
+            target=self._tx_writer_loop, name="tx-writer", daemon=True
+        )
+        self._tx_thread.start()
+        
         self._port.open()
 
     def close(self) -> None:
@@ -109,8 +123,8 @@ class OIService:
         - Any exceptions during unregistering or joining are caught and logged.
         """
         # 1) Tell the dispatcher loop to exit on its next iteration.
-        was_running = self._running
-        self._running = False
+        was_running = self._alive.is_set()
+        self._alive.clear()
 
         # 2) Best-effort: unregister the reader so no more callbacks arrive.
         try:
@@ -118,8 +132,14 @@ class OIService:
         except Exception:
             # Reader may already be cleared or port may be mid-shutdown.
             log.exception("Error while unregistering serial reader")
+            
+        # 3) Wake TX writer (in case it's blocked on get)
+        try:
+            self._tx_frames.put(SENTINEL, timeout=0)
+        except Exception:
+            pass
 
-        # 3) If we had a running dispatcher, try to join it (but never self-join).
+        # 4) If we had a running dispatcher, try to join it (but never self-join).
         t = self._dispatcher_thread
         if was_running and t and t.is_alive() and t is not threading.current_thread():
             try:
@@ -130,7 +150,17 @@ class OIService:
         self._dispatcher_thread = None
         log.info("Dispatcher thread stopped")
 
-        # 4) Close the serial port last to release the device and file descriptors.
+        # 5) Join TX writer
+        t = self._tx_thread
+        if t and t.is_alive() and t is not threading.current_thread():
+            try:
+                t.join(timeout=0.5)
+            except Exception:
+                log.exception("Error while joining tx-writer thread")
+        self._tx_thread = None
+        log.info("TX writer thread stopped")  
+    
+        # 6) Close the serial port last to release the device and file descriptors.
         self._port.close()
 
 
@@ -139,32 +169,70 @@ class OIService:
     # ------------------------------------------------------------
 
     def reset(self) -> None:
-        self._port.write(bytes([Opcode.RESET]))
-        time.sleep(0.1)
+        self._send(oi_codec.encode_reset())
 
     def start(self) -> None:
-        self._port.write(bytes([Opcode.START]))
-        time.sleep(0.1)
+        self._send(oi_codec.encode_start())
 
     def safe(self) -> None:
-        self._port.write(bytes([Opcode.SAFE]))
-        time.sleep(0.1)
+        self._send(oi_codec.encode_safe())
 
     def full(self) -> None:
-        self._port.write(bytes([Opcode.FULL]))
-        time.sleep(0.1)
+        self._send(oi_codec.encode_full())
 
     def dock(self) -> None:
-        self._port.write(bytes([Opcode.DOCK]))
+        self._send(oi_codec.encode_dock())
 
     def power_off(self) -> None:
-        self._port.write(bytes([Opcode.POWER]))
+        self._send(oi_codec.encode_power())
 
     def drive(self, velocity: int, radius: int) -> None:
-        self._port.write(oi_codec.encode_drive(velocity, radius))
+        self._send(oi_codec.encode_drive(velocity, radius))
 
     def drive_direct(self, right: int, left: int) -> None:
-        self._port.write(oi_codec.encode_drive_direct(right, left))
+        self._send(oi_codec.encode_drive_direct(right, left))
+
+    def stream_pause(self) -> None:
+        """Pause sensor streaming (STREAM_CTRL=0)."""
+        self._send(oi_codec.encode_pause_stream())
+
+    def stream_resume(self) -> None:
+        """Resume sensor streaming (STREAM_CTRL=1)."""
+        self._send(oi_codec.encode_resume_stream())
+
+    def motors(
+        self,
+        *,
+        main_on: bool,
+        vacuum_on: bool,
+        side_on: bool,
+        main_reverse: bool = False,
+        side_reverse: bool = False,
+    ) -> None:
+        """Control main, vacuum, side brushes; optional direction flips for main/side."""
+        self._send(
+            oi_codec.encode_motors(
+                main_on=main_on,
+                vacuum_on=vacuum_on,
+                side_on=side_on,
+                main_reverse=main_reverse,
+                side_reverse=side_reverse,
+            )
+        )
+        
+    def pwm_motors(self, main_pwm: int, side_pwm: int, vacuum_pwm: int) -> None:
+        """Set PWM for main/side (±127) and vacuum (0..127)."""
+        self._send(oi_codec.encode_pwm_motors(main_pwm, side_pwm, vacuum_pwm))
+        
+
+    def drive_pwm(self, right_pwm: int, left_pwm: int) -> None:
+        """
+        Drive wheels using raw PWM values (-255..255), right then left.
+        Positive = forward, negative = reverse.
+        """
+        self._send(oi_codec.encode_drive_pwm(right_pwm, left_pwm))
+
+
 
     # ------------------------------------------------------------
     # Sensor Queries
@@ -172,26 +240,70 @@ class OIService:
 
     def get_sensor(self, packet_id: int, timeout: float = 1.0) -> object:
         """
-        Request one sensor packet (polled mode).
-        Blocking call: sends [142][id] and waits for reply.
+        Query a single sensor packet in polled mode (OI opcode 142: SENSORS).
 
-        Per OI spec, reply = only the data bytes (no leading packet ID).
+        Overview
+        --------
+        Sends a one-shot `[142][packet_id]` request and blocks until the reply for
+        *that* packet is parsed by the RX pipeline, or until `timeout` elapses.
+        The decoded value (typed per `oi_protocol.py`) is returned.
+
+        Parameters
+        ----------
+        packet_id : int
+            The OI packet ID to read (e.g., 7, 14, 18, 34, 45, 25, ...).
+            Must be supported by `oi_protocol.packet_length(packet_id)`.
+        timeout : float
+            Maximum seconds to wait for the requested packet to arrive/parse.
+
+        Behavior
+        --------
+        - Clears any stale cache entry for `packet_id`.
+        - Clears the one-shot RX scratch buffer and marks `_pending_request_id`.
+        - Validates `packet_id` via `oi_protocol.packet_length(...)`.
+        - Enqueues the request via the TX writer (`_send(...)`).
+        - Waits until `_latest_packets` contains a fresh value for `packet_id`.
+
+        Returns
+        -------
+        object
+            The decoded value for `packet_id` (e.g., int, dict of bitfields, etc.)
+            as defined by the corresponding schema in `oi_protocol.py`.
+
+        Raises
+        ------
+        ValueError
+            If `packet_id` is unknown/unsupported (length <= 0).
+        TimeoutError
+            If no decoded value for `packet_id` is received within `timeout`.
+
+        Notes
+        -----
+        • If continuous streaming is active, pause it first via `stream_pause()`,
+        or prefer the streaming API to avoid mode conflicts.
+        • Decoding is performed by the RX pipeline using `oi_protocol` constructs,
+        so return types match your packet adapters (e.g., Packet 7/14/18/34/45).
+
+        Example
+        -------
+        >>> svc.get_sensor(7)
+        {'bump_right': False, 'bump_left': False, 'wheel_drop_right': False, 'wheel_drop_left': False}
         """
         # Clear stale state
         self._latest_packets.pop(packet_id, None)
         self._rx_buffer_single.clear()
         self._pending_request_id = packet_id
 
-        # Determine expected reply length
+        # Validate packet length (ensures supported ID)
         expected_len = oi_protocol.packet_length(packet_id)
         print("DEBUG: packet_length(", packet_id, ") =", expected_len)
         if expected_len <= 0:
             raise ValueError(f"Unknown or unsupported packet ID {packet_id}")
 
-        # Send request
-        self._port.write(oi_codec.encode_sensors(packet_id))
+        # Send request via TX writer (thread-safe)
+        self._send(oi_codec.encode_sensors(packet_id))
 
-        # Wait until RX handler parses reply
+        # Wait for the parser to populate the latest value
         start = time.time()
         while time.time() - start < timeout:
             if packet_id in self._latest_packets:
@@ -202,12 +314,67 @@ class OIService:
 
     def query_list(self, packet_ids: list[int], timeout: float = 1.0) -> dict[int, object]:
         """
-        Request multiple sensor packets once (opcode 149).
-        Returns dict mapping id → parsed value.
+        Query multiple sensor packets in one request (OI opcode 149).
+
+        Overview
+        --------
+        Builds and sends a single `QUERY_LIST` frame (`[149][N][id1]...[idN]`) and
+        blocks until *all* requested packet IDs have been parsed by the RX path or
+        until `timeout` elapses. Parsed values are returned as a mapping
+        `{packet_id: parsed_value}`. This is a *polled* (one-shot) read; it does not
+        start streaming.
+
+        Parameters
+        ----------
+        packet_ids : list[int]
+            One or more OI packet IDs to query (e.g., [7, 14, 18]).
+            - Duplicates are allowed; they don’t change the result (the last value wins).
+            - An empty list returns `{}` immediately.
+        timeout : float
+            Max seconds to wait for all requested packets to arrive and be parsed.
+            The wait includes any configured TX pacing.
+
+        Behavior
+        --------
+        - Clears stale cache entries for the requested IDs.
+        - Enqueues a `QUERY_LIST` frame via the TX writer (thread-safe).
+        - Waits until every requested ID has a fresh entry in `_latest_packets`.
+        - Returns a dict containing exactly the requested IDs (order in the dict
+        is not guaranteed).
+
+        Returns
+        -------
+        dict[int, object]
+            Mapping from packet ID to the decoded/typed value as defined in
+            `oi_protocol.py` (e.g., booleans/bitfields/adapters/ints).
+
+        Raises
+        ------
+        TimeoutError
+            If not all requested IDs were received/parsed within `timeout`.
+
+        Notes
+        -----
+        • If sensor streaming is active, pause it first (see `stream_pause()`),
+        or prefer the streaming API instead of mixing modes.
+        • Values are decoded by the RX pipeline using the `oi_protocol` schemas,
+        so types match your packet adapters (e.g., Packet 7/14/18/34/45 bitfields).
+
+        Example
+        -------
+        >>> svc.query_list([7, 14, 18], timeout=1.0)
+        {7: {'bump_right': False, 'bump_left': False, 'wheel_drop_right': False, 'wheel_drop_left': False},
+        14: {'side_brush': False, 'reserved_bit1': False, 'main_brush': False, 'right_wheel': False, 'left_wheel': False},
+        18: {'wall': False, 'cliff_left': False, 'cliff_front_left': False, 'cliff_front_right': False,
+            'cliff_right': False, 'virtual_wall': False, 'overcurrent_left_wheel': False, 'overcurrent_right_wheel': False}}
         """
+        if not packet_ids:
+            return {}
         for pid in packet_ids:
             self._latest_packets.pop(pid, None)
-        self._port.write(oi_codec.encode_query_list(packet_ids))
+
+        # enqueue via TX writer (thread-safe)
+        self._send(oi_codec.encode_query_list(packet_ids))
 
         start = time.time()
         while time.time() - start < timeout:
@@ -216,13 +383,46 @@ class OIService:
             time.sleep(0.01)
         raise TimeoutError(f"Sensor packets {packet_ids} not fully received")
 
+
     def start_stream(self, packet_ids: list[int]) -> None:
-        """Start continuous streaming of sensor packets."""
-        self._port.write(oi_codec.encode_stream(packet_ids))
+        """
+        Start continuous sensor streaming (OI opcode 148: STREAM).
+
+        Overview
+        --------
+        Builds `[148][N][id1]...[idN]` and enqueues it via the TX writer. After this,
+        the robot begins sending those packets periodically until paused/stopped.
+        Your RX pipeline will keep parsing them and updating `_latest_packets`, and
+        `on_sensor` (if registered) will be invoked per decoded item.
+
+        Parameters
+        ----------
+        packet_ids : list[int]
+            One or more OI packet IDs to stream. An empty list is invalid.
+
+        Notes
+        -----
+        • Do not mix `get_sensor/query_list` polling while streaming; pause first.
+        • See also: `stream_pause()` / `stream_resume()` to control an active stream.
+        """
+        if not packet_ids:
+            raise ValueError("packet_ids must not be empty")
+        self._send(oi_codec.encode_stream(packet_ids))
+
 
     def stop_stream(self) -> None:
-        """Stop continuous streaming."""
-        self._port.write(oi_codec.encode_stop_stream())
+        """
+        Pause/stop continuous streaming (OI opcode 150: STREAM_CTRL=0).
+
+        Overview
+        --------
+        Enqueues `[150][0]` to pause the active stream. Use `stream_resume()` to
+        resume without resending the packet list, or `start_stream([...])` to start
+        a fresh set of streamed packets.
+        """
+        # Backward-compatible with older name “stop_stream”; uses the pause control.
+        self._send(oi_codec.encode_pause_stream())
+
 
     # ------------------------------------------------------------
     # RX Handling
@@ -237,7 +437,8 @@ class OIService:
         - Query list replies (opcode 149): TODO – parse multiple packets.
         - Boot/log messages: ASCII text, fallback.
         """
-
+        if not self._alive.is_set():
+            return
         if not data:
             return
 
@@ -299,6 +500,8 @@ class OIService:
         
     def _on_serial_bytes(self, data: bytes) -> None:
         """Callback from PySerialPort with incoming bytes."""
+        if not self._alive.is_set():
+            return
         if not data:
             return
         ok = self._rx_bytes.put(data, timeout=Q_PUT_TIMEOUT)
@@ -308,7 +511,7 @@ class OIService:
     def _dispatcher_loop(self) -> None:
         """Background thread to dispatch RX bytes"""
         log.info("Dispatcher thread started")
-        while self._running:
+        while self._alive.is_set():
             ok, chunk = self._rx_bytes.get(timeout=Q_GET_TIMEOUT)
             if not ok:
                 continue    # timed wait; no busy spin
@@ -430,3 +633,34 @@ class OIService:
             log.warning("RX resync: dropping 1 byte (buf=%d)", len(self._rx_buf))
             del self._rx_buf[0]
             continue
+
+    # --- new: TX helpers at class scope ---
+    def _send(self, frame: bytes) -> None:
+        """Enqueue a command frame to be written by the TX writer thread."""
+        if not frame:
+            return
+        if not self._alive.is_set():
+            log.debug("drop TX while not alive (len=%d)", len(frame))
+            return
+        ok = self._tx_frames.put(frame, timeout=Q_PUT_TIMEOUT)
+        if not ok:
+            log.warning("[TxFrameQueue] overflow: dropped frame len=%d", len(frame))
+
+    def _tx_writer_loop(self) -> None:
+        """Single writer that owns serial TX to avoid interleaving from many callers."""
+        log.info("TX writer started")
+        while True:
+            ok, item = self._tx_frames.get(timeout=Q_GET_TIMEOUT)
+            if not ok:
+                if not self._alive.is_set():
+                    break
+                continue
+            if item is SENTINEL or not self._alive.is_set():
+                break
+            try:
+                self._port.write(item)
+            except Exception:
+                log.exception("TX write failed")
+            if TX_INTER_CMD_DELAY:
+                time.sleep(TX_INTER_CMD_DELAY)
+        log.info("TX writer exiting")
