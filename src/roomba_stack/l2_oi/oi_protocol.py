@@ -41,6 +41,7 @@ class Opcode(IntEnum):
     PLAY         = 141    # Play song
     SENSORS      = 142    # Query one sensor packet
     DOCK         = 143    # Seek dock (same as pressing dock button)
+    PWM_MOTORS   = 144    # Per-motor PWM: main, side, vacuum
     DRIVE_DIRECT = 145    # Drive wheels independently
     DRIVE_PWM    = 146    # Drive wheels with raw PWM values
     STREAM       = 148    # Start continuous streaming of sensor packets
@@ -54,7 +55,27 @@ class Opcode(IntEnum):
 
 # Packet 7: Bumps & Wheel Drops (1 byte; bit0..bit3)
 class _P7Adapter(Adapter):
-    """Adapter that decodes packet 7 bitfields into named booleans."""
+    """
+    Operation:
+      Two front bump switches and two wheel-drop switches are reported as a
+      single bitfield. Use this to react to collisions (bump_* bits) and to detect
+      unsafe suspension (wheel_drop_* bits).
+
+    Semantics:
+      - 1 = sensor/event is active (asserted)
+      - Bits map as follows (only 0..3 are defined; mask with 0x0F):
+          bit0: bump_right
+          bit1: bump_left
+          bit2: wheel_drop_right
+          bit3: wheel_drop_left
+
+    Related:
+      - Packet 45 (Light Bumper) provides *pre-contact* IR detections (six zones).
+        Packet 7 is *mechanical/contact* and wheel safety.
+
+    Example:
+      Raw byte 0x05 (0000_0101b) → bump_right=True, wheel_drop_right=True.
+    """
     def _decode(self, obj, ctx, path):
         b = obj & 0x0F
         return {
@@ -158,7 +179,37 @@ Packet30_CliffFrontRightSignal=Struct("cliff_front_right_signal" / Int16ub)
 Packet31_CliffRightSignal    = Struct("cliff_right_signal" / Int16ub)
 
 # Charging sources & mode
-Packet34_ChargingSources = Struct("charging_sources" / Int8ub)  # bits: home base, internal
+# Packet 34: Charging Sources Available (1 byte; bit0..bit1)
+class _P34Adapter(Adapter):
+    """
+    Operation:
+      Reports whether the robot is connected to powered charging sources.
+
+    Semantics (per spec):
+      - 1 = charging source present and powered; 0 = not present or not powered.
+      - Bits (only 0..1 defined; mask with 0x03):
+          bit0: home_base
+          bit1: internal_charger
+      - Range: 0..3.
+
+    Example:
+      Raw 0x03 → {"home_base": True, "internal_charger": True}
+      Raw 0x00 → {"home_base": False, "internal_charger": False}
+    """
+    def _decode(self, obj, ctx, path):
+        b = obj & 0x03
+        return {
+            "home_base":         bool(b & 0x01),  # bit0 (1 = present & powered)
+            "internal_charger":  bool(b & 0x02),  # bit1 (1 = present & powered)
+        }
+    def _encode(self, obj, ctx, path):
+        v = 0
+        if obj.get("home_base"):         v |= 0x01
+        if obj.get("internal_charger"):  v |= 0x02
+        return v
+
+Packet34_ChargingSources = _P34Adapter(Int8ub)
+"""Construct schema for packet 34 (charging sources available)."""
 
 # ============================================================
 # OI Command Opcodes (TX)
@@ -186,6 +237,10 @@ Packet35_OIMode = Struct(                                       # The current OI
 
 Packet36_SongNumber      = Struct("song_number" / Int8ub)
 Packet37_SongPlaying     = Struct("song_playing" / Int8ub)      # 0 = no, 1 = yes
+
+# Number of Stream Packets Packet ID: 38    Data Bytes 1, unsigned
+# The number of data stream packets is returned.
+# Range: 0-108
 Packet38_NumStreamPkts   = Struct("num_stream_packets" / Int8ub)
 
 # Requested drive parameters
@@ -199,7 +254,59 @@ Packet43_LeftEncoderCounts  = Struct("left_encoder_counts" / Int16sb)   # counts
 Packet44_RightEncoderCounts = Struct("right_encoder_counts" / Int16sb)
 
 # Light bumper group
-Packet45_LightBumper         = Struct("light_bumper" / Int8ub)         # bitmask, 0–127
+# Packet 45: Light Bumper (1 byte; bit0..bit5)
+class _P45Adapter(Adapter):
+    """
+    Operation:
+      Six infrared “light bumper” detectors across the front report pre-contact
+      obstacle detections as a bitfield. This is the binary version of packets
+      46-51 (which expose analog strengths). Use this to know *where* an obstacle
+      is before physical contact.
+
+    Semantics:
+      - 1 = detector sees a close obstacle (reflectance threshold crossed)
+      - Bits map left→right across the robot's front:
+          bit0: light_bump_left
+          bit1: light_bump_front_left
+          bit2: light_bump_center_left
+          bit3: light_bump_center_right
+          bit4: light_bump_front_right
+          bit5: light_bump_right
+      - Only bits 0..5 are defined; mask with 0x3F.
+
+    Related:
+      - Packets 46-51: analog signal strengths (0-4095) for the same six zones.
+      - “Wall” (legacy) corresponds to light_bump_right.
+
+    Example:
+      Raw byte 0x05 (0000_0101b) → {left=True, center_left=True} → obstacle near left/front-left.
+    """
+    def _decode(self, obj, ctx, path):
+        b = obj & 0x3F
+        return {
+            "light_bump_left":         bool(b & 0x01),  # bit0
+            "light_bump_front_left":   bool(b & 0x02),  # bit1
+            "light_bump_center_left":  bool(b & 0x04),  # bit2
+            "light_bump_center_right": bool(b & 0x08),  # bit3
+            "light_bump_front_right":  bool(b & 0x10),  # bit4
+            "light_bump_right":        bool(b & 0x20),  # bit5
+        }
+
+    def _encode(self, obj, ctx, path):
+        v = 0
+        if obj.get("light_bump_left"):         v |= 0x01
+        if obj.get("light_bump_front_left"):   v |= 0x02
+        if obj.get("light_bump_center_left"):  v |= 0x04
+        if obj.get("light_bump_center_right"): v |= 0x08
+        if obj.get("light_bump_front_right"):  v |= 0x10
+        if obj.get("light_bump_right"):        v |= 0x20
+        return v
+
+Packet45_LightBumper = _P45Adapter(Int8ub)
+"""Construct schema for packet 45 (light bumper bitfield)."""
+
+
+# Light bumper individual sensors (6 packets, 2 bytes each)
 Packet46_LightBumpLeft       = Struct("light_bump_left" / Int16ub)
 Packet47_LightBumpFrontLeft  = Struct("light_bump_front_left" / Int16ub)
 Packet48_LightBumpCenterLeft = Struct("light_bump_center_left" / Int16ub)
