@@ -118,6 +118,62 @@ def main():
                 svc._port.set_rts_low()
                 svc.power_off()
                 print("[INFO] Deep off: Roomba will stay OFF until wakeup pulse or CLEAN button.")
+                            
+            elif cmd.startswith("drive"):
+                # Accept both positional and option forms:
+                #  - drive <vel> <radius>
+                #  - drive --straight <vel>
+                #  - drive --spin-left <vel>
+                #  - drive --spin-right <vel>
+                try:
+                    parts = cmd.split()
+                    args = parts[1:]  # drop 'drive'
+                    if not args:
+                        print("usage: drive <vel> <radius> | drive --straight <vel> | drive --spin-left <vel> | drive --spin-right <vel>")
+                        continue
+
+                    # Shorthand options
+                    if args[0] in ("--straight", "--spin-left", "--spin-right"):
+                        if len(args) != 2:
+                            print("usage: drive --straight <vel> | --spin-left <vel> | --spin-right <vel>")
+                            continue
+                        vel = int(args[1])
+                        if not (-500 <= vel <= 500):
+                            print("error: velocity must be in -500..500 mm/s")
+                            continue
+                        if args[0] == "--straight":
+                            radius = -32768   # 0x8000
+                        elif args[0] == "--spin-left":
+                            radius = 1
+                        else:
+                            radius = -1
+                        svc.drive(vel, radius)
+                        print(f"DRIVE sent: vel={vel}, radius={radius}")
+                        continue
+
+                    # Positional form
+                    if len(args) != 2:
+                        print("usage: drive <vel> <radius>")
+                        continue
+
+                    vel = int(args[0])
+                    radius = int(args[1])
+
+                    # Validate per OI spec (be permissive with special “straight” values)
+                    if not (-500 <= vel <= 500):
+                        print("error: velocity must be in -500..500 mm/s")
+                        continue
+                    if radius not in (-32768, 32767, -1, 1) and not (-2000 <= radius <= 2000):
+                        print("error: radius must be in -2000..2000, or one of {-32768, 32767, -1, 1}")
+                        continue
+
+                    svc.drive(vel, radius)
+                    print(f"DRIVE sent: vel={vel}, radius={radius}")
+                except ValueError:
+                    print("error: velocity/radius must be integers")
+                except Exception as e:
+                    print(f"drive failed: {e}")
+
             elif cmd.startswith("sensors"):
                 parts = cmd.split()
                 if len(parts) == 2 and parts[1].isdigit():
