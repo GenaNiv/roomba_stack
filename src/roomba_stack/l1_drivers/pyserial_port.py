@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from typing import Optional
 import threading
+import logging
 import time
 
 import serial  # provided by pyserial
 from serial import SerialException
-
 from .serial_port import SerialPort, SerialError, BytesCallback
 
 DEFAULT_READ_CHUNK = 256  # put near top of file if you prefer
+
+log = logging.getLogger(__name__)
 
 class PySerialPort(SerialPort):
     """
@@ -73,7 +75,7 @@ class PySerialPort(SerialPort):
         self._stop_flag.clear()
         self._reader_thread = threading.Thread(
             target=self._reader_loop,
-            name="PySerialReader",
+            name="rx-reader",
             daemon=True
         )
         self._reader_thread.start()
@@ -198,6 +200,7 @@ class PySerialPort(SerialPort):
         This is a private helper method and should never be called directly.
         It is started automatically when the port is opened.
         """
+        log.info("RX reader started")
         ser = self._ser
         if not ser:
             return

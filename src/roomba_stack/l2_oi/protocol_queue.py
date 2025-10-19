@@ -15,7 +15,7 @@ class BoundedQueue:
         """TBD"""
         if not isinstance(maxsize, int) or maxsize <= 0:
             raise ValueError("maxsize must be a positive integer")
-        if not isinstance(name, str) or not name.strip:
+        if not isinstance(name, str) or not name.strip():
             raise ValueError("name must be a non-empty string")
         if not isinstance(on_overflow, str) or on_overflow != "drop_newest":
             raise ValueError("on_overflow must be 'drop_newest'")

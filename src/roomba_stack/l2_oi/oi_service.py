@@ -129,7 +129,7 @@ class OIService:
         Gracefully stop the dispatcher and close the serial connection.
 
         Behavior:
-        - Signals the dispatcher loop to stop by setting `_running = False`.
+        - Signals the dispatcher loop to stop by setting `_alive = False`.
         - Unregisters the serial reader to prevent late callbacks after shutdown starts.
         - Joins the dispatcher thread with a bounded timeout (0.5s) if it's alive
             and not the current thread (avoids self-join deadlock).
@@ -210,6 +210,17 @@ class OIService:
     def drive_direct(self, right: int, left: int) -> None:
         self._send(oi_codec.encode_drive_direct(right, left))
 
+    def pwm_motors(self, main_pwm: int, side_pwm: int, vacuum_pwm: int) -> None:
+        """Set PWM for main/side (±127) and vacuum (0..127)."""
+        self._send(oi_codec.encode_pwm_motors(main_pwm, side_pwm, vacuum_pwm))
+
+    def drive_pwm(self, right_pwm: int, left_pwm: int) -> None:
+        """
+        Drive wheels using raw PWM values (-255..255), right then left.
+        Positive = forward, negative = reverse.
+        """
+        self._send(oi_codec.encode_drive_pwm(right_pwm, left_pwm))
+        
     def stream_pause(self) -> None:
         """Pause sensor streaming (STREAM_CTRL=0)."""
         self._send(oi_codec.encode_pause_stream())
@@ -238,20 +249,6 @@ class OIService:
             )
         )
         
-    def pwm_motors(self, main_pwm: int, side_pwm: int, vacuum_pwm: int) -> None:
-        """Set PWM for main/side (±127) and vacuum (0..127)."""
-        self._send(oi_codec.encode_pwm_motors(main_pwm, side_pwm, vacuum_pwm))
-        
-
-    def drive_pwm(self, right_pwm: int, left_pwm: int) -> None:
-        """
-        Drive wheels using raw PWM values (-255..255), right then left.
-        Positive = forward, negative = reverse.
-        """
-        self._send(oi_codec.encode_drive_pwm(right_pwm, left_pwm))
-
-
-
     # ------------------------------------------------------------
     # Sensor Queries
     # ------------------------------------------------------------
@@ -725,7 +722,7 @@ class OIService:
             return (PID_ASCII_BATSTAT, d)
         return None
 
-    # --- new: TX helpers at class scope ---
+    # --- TX helpers (single writer owns serial TX) ---
     def _send(self, frame: bytes) -> None:
         """Enqueue a command frame to be written by the TX writer thread."""
         if not frame:
@@ -770,36 +767,8 @@ class OIService:
                 return i + 1
         return -1
     
-    # --- TX helpers (single writer owns serial TX) ---
-    def _send(self, frame: bytes) -> None:
-        """Enqueue a command frame to be written by the TX writer thread."""
-        if not frame:
-            return
-        if not self._alive.is_set():
-            log.debug("drop TX while not alive (len=%d)", len(frame))
-            return
-        ok = self._tx_frames.put(frame, timeout=Q_PUT_TIMEOUT)
-        if not ok:
-            log.warning("[TxFrameQueue] overflow: dropped frame len=%d", len(frame))
 
-    def _tx_writer_loop(self) -> None:
-        """Single writer that owns serial TX to avoid interleaving from many callers."""
-        log.info("TX writer started")
-        while True:
-            ok, item = self._tx_frames.get(timeout=Q_GET_TIMEOUT)
-            if not ok:
-                if not self._alive.is_set():
-                    break
-                continue
-            if item is SENTINEL or not self._alive.is_set():
-                break
-            try:
-                self._port.write(item)
-            except Exception:
-                log.exception("TX write failed")
-            if TX_INTER_CMD_DELAY:
-                time.sleep(TX_INTER_CMD_DELAY)
-        log.info("TX writer exiting")
+
 
 
 

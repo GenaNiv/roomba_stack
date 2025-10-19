@@ -134,3 +134,12 @@ Commands (Start/Safe/Drive/Sensors/StreamOn/Off)
     → encode via codec
     → enqueue TxFrameQueue (timed put; bounded)
     → writer thread drains and pyserial.write(frame)
+
+How to configure speakerphone:
+  320  sudo apt install -y mpv ffmpeg
+  321  pip3 install --upgrade yt-dlp
+  Example to play songs,
+  322  mpv --no-video --ao=pulse --ytdl-format=bestaudio --volume=70   "ytdl://ytsearch1:beatles let it be official audio"
+  323  mpv --no-video --ao=pulse --ytdl-format=bestaudio --volume=70   "ytdl://ytsearch1:Taylor Swift official audio"
+  324  mpv --no-video --ao=pulse --ytdl-format=bestaudio --volume=70   "ytdl://ytsearch1:Taylor Swift August official audio"
+  325  mpv --no-video --ao=pulse --ytdl-format=bestaudio --volume=70   "ytdl://ytsearch1:beatles let it be official audio"
