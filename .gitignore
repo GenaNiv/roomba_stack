@@ -7,4 +7,4 @@ build/
 dist/
 *.egg-info/
 .env
-start_safe.bin
+start_safe.binchatgpt_prompt
