@@ -25,7 +25,7 @@ Usage:
 
 import time
 import logging
-from typing import Callable, Optional
+from typing import Callable, Optional, Mapping
 import threading
 import re
 
@@ -34,6 +34,9 @@ from . import oi_codec
 from . import oi_decode
 from . import oi_protocol
 from .protocol_queue import BoundedQueue
+from roomba_stack.l0_core import EventBus
+from roomba_stack.l0_core.events import SensorUpdate, now_ms, Value  # Value = int|float|bool|str
+
 
 # -----------------------------------------------------------------------------
 # Feature flags / architecture
@@ -76,7 +79,7 @@ class OIService:
     High-level service for controlling a Roomba via OI.
     """
 
-    def __init__(self, device: str, baudrate: int = 115200) -> None:
+    def __init__(self, device: str, eventbus: EventBus, baudrate: int = 115200) -> None:
         self._port = PySerialPort(device, baudrate)
         self._latest_packets: dict[int, object] = {}
         self._on_sensor: Optional[Callable[[int, object], None]] = None
@@ -103,6 +106,8 @@ class OIService:
 
         # ASCII accumulation buffer
         self._ascii_accum = bytearray()
+        
+        self._eventbus = eventbus
 
     # -------------------------------------------------------------------------
     # Lifecycle
@@ -549,3 +554,21 @@ class OIService:
             if TX_INTER_CMD_DELAY:
                 time.sleep(TX_INTER_CMD_DELAY)
         log.info("TX writer exiting")
+
+
+    def _publish_sensor(self, packet_id: int, fields: Mapping[str, Value]) -> None:
+        """
+        Build and publish a typed SensorUpdate on topic 'sensors'.
+        Runs fast; if the EventBus queue is full we drop and continue (no IO stall).
+        """
+        evt = SensorUpdate(
+            timestamp_millis=now_ms(),
+            packet_id=packet_id,
+            source="oi",
+            fields=fields,
+        )
+        ok = self._eventbus.publish("sensors", evt)
+        if not ok:
+            # Minimal early behavior: make it visible during bring-up.
+            # Later we will publish a Fault event instead of printing.
+            print("[WARN] EventBus full; dropped SensorUpdate", packet_id, fields)
