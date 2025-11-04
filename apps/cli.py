@@ -19,6 +19,10 @@ import argparse
 import time
 from roomba_stack.l2_oi.oi_service import OIService
 from roomba_stack.l2_oi.oi_service import PID_ASCII_GENERIC, PID_ASCII_BATSTAT
+from roomba_stack.l3_domain.state_store import RobotStateStore
+from roomba_stack.l0_core import EventBus, CommandBus
+from roomba_stack.l0_core.events import SensorUpdate, StopCmd, DriveCmd, DriveDirectCmd
+
 
 MODE_NAMES = {0:"Off", 1:"Passive", 2:"Safe", 3:"Full"}
 
@@ -76,17 +80,35 @@ Available Commands:
   quit         - Exit CLI
 """)
 
+_last_mode = {"mode": None}  # tiny mutable holder local to the CLI thread
 
+def _on_sensors(evt: SensorUpdate) -> None:
+    mode = evt.fields.get("oi_mode")
+    if mode is not None and mode != _last_mode["mode"]:
+        print(f"[MODE] now={mode} (packet_id={evt.packet_id})")
+        _last_mode["mode"] = mode
+
+    
 def main():
     parser = argparse.ArgumentParser(description="Roomba CLI")
     parser.add_argument("--device", default="/dev/ttyUSB0", help="Serial device path")
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate")
     args = parser.parse_args()
 
+    eventbus = EventBus()
+
     # Initialize OIService
-    svc = OIService(device=args.device, baudrate=args.baud)
+    svc = OIService(device=args.device, eventbus=eventbus, baudrate=args.baud)
     svc.open()
     svc.set_on_sensor(rx_logger)
+    
+    state_store = RobotStateStore(eventbus)  # keeps itself up to date via subscription
+    eventbus.subscribe("sensors", _on_sensors)
+    
+    commandbus = CommandBus()
+    commandbus.register(StopCmd, svc.handle_stop)
+    commandbus.register(DriveCmd, svc.handle_drive)          # twist
+    commandbus.register(DriveDirectCmd, svc.handle_drive_direct)  # direct
 
     print("Roomba CLI started. Type 'help' for commands.")
 
