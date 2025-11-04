@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from roomba_stack.l2_oi.protocol_queue import BoundedQueue
+
 from typing import Any, Callable, Dict, Type, TypeVar, DefaultDict, List
 from collections import defaultdict
 import threading
@@ -48,7 +50,7 @@ class EventBus:
 
     def __init__(self, capacity: int = 1024, publish_timeout_ms: int = 10) -> None:
         self._subscribers: DefaultDict[str, List[Callable[[object], None]]] = defaultdict(list)
-        self._queue: "queue.Queue[tuple[str, object]]" = queue.Queue(maxsize=capacity)
+        self._queue: BoundedQueue = BoundedQueue(maxsize=capacity, name="EventBus")
         self._publish_timeout = publish_timeout_ms / 1000.0
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -72,25 +74,21 @@ class EventBus:
         Policy for now: drop newest when full (protects the producer thread).
         We can add a coalescing or drop-oldest policy later as a constructor option.
         """
-        try:
-            self._queue.put((topic, event), timeout=self._publish_timeout)
-            return True
-        except queue.Full:
-            return False
+        return self._queue.put((topic, event), timeout=self._publish_timeout)
 
     # ---- lifecycle ----
     def close(self) -> None:
-        self._stop.set()
-        try:
-            self._queue.put_nowait(("__stop__", None))
-        except queue.Full:
-            pass
+        # best-effort sentinel; if full, we’ll exit via timeout below
+        self._queue.put(("__stop__", None), timeout=0.0)
         self._thread.join(timeout=1.0)
 
     # ---- dispatcher loop ----
     def _run(self) -> None:
         while not self._stop.is_set():
-            topic, event = self._queue.get()
+            ok, item = self._queue.get(timeout=0.1)
+            if not ok:
+                continue
+            topic, event = item
             if topic == "__stop__":
                 break
             for callback in list(self._subscribers.get(topic, [])):

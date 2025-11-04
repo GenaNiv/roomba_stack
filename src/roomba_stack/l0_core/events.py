@@ -84,7 +84,16 @@ class DriveCmd:
     angular_deg_s: int
     duration_ms: int | None = None
 
-
+@dataclass(frozen=True, slots=True)
+class DriveDirectCmd:
+    """
+    Request to drive by direct wheel speeds (mm/s).
+    Positive = forward; negative = backward.
+    """
+    left_mm_s: int
+    right_mm_s: int
+    duration_ms: int | None = None
+    
 @dataclass(frozen=True, slots=True)
 class StopCmd:
     """
@@ -92,3 +101,9 @@ class StopCmd:
     """
     reason: str = "user"
     
+@dataclass(frozen=True, slots=True)
+class AudioTranscript:
+    timestamp_millis: int
+    text: str
+    confidence: float | None = None
+    source: str | None = None

@@ -35,8 +35,7 @@ from . import oi_decode
 from . import oi_protocol
 from .protocol_queue import BoundedQueue
 from roomba_stack.l0_core import EventBus
-from roomba_stack.l0_core.events import SensorUpdate, now_ms, Value  # Value = int|float|bool|str
-
+from roomba_stack.l0_core.events import SensorUpdate, now_ms, Value, Fault, Severity, StopCmd, DriveCmd, DriveDirectCmd # Value = int|float|bool|str
 
 # -----------------------------------------------------------------------------
 # Feature flags / architecture
@@ -65,6 +64,10 @@ ASCII_MAX   = 80                 # cap per-line capture
 # Virtual PIDs for ASCII lines
 PID_ASCII_GENERIC = -100         # plain text line
 PID_ASCII_BATSTAT = -101         # parsed battery/status line
+
+# The physical distance between the two drive wheels (wheelbase) in millimetres.
+# Differential-drive math needs this distance to convert a turn rate into different left/right speeds.
+WHEEL_BASE_MM = 235  
 
 _ASCII_BAT_RE = re.compile(
     r"^bat:\s+min\s+(?P<min>\d+)\s+sec\s+(?P<sec>\d+)\s+mV\s+(?P<mv>\d+)\s+mA\s+(?P<ma>-?\d+)\s+rx-byte\s+(?P<rx>\d+)\s+mAH\s+(?P<mah>\d+)\s+state\s+(?P<state>\d+)\s+mode\s+(?P<mode>\d+)",
@@ -381,6 +384,25 @@ class OIService:
             self._rx_buf.extend(chunk)
             self._decode_available_frames()
 
+    def _publish_sensor(self, packet_id: int, fields: Mapping[str, Value]) -> None:
+        evt = SensorUpdate(
+            timestamp_millis=now_ms(),
+            packet_id=packet_id,
+            source="oi",
+            fields=fields,
+        )
+        ok = self._eventbus.publish("sensors", evt)
+        if not ok:
+            # Best-effort fault notification (may also drop if queue is still full)
+            fault = Fault(
+                timestamp_millis=now_ms(),
+                severity=Severity.WARN,
+                code="EVENTBUS_OVERFLOW",
+                message="Dropped SensorUpdate due to full EventBus queue",
+                context={"packet_id": packet_id, "queue": "sensors"},
+            )
+            self._eventbus.publish("faults", fault)  # ignore return; do not block IO
+
     def _deliver(self, pid: int, parsed: object) -> None:
         self._latest_packets[pid] = parsed
         if self._on_sensor:
@@ -388,6 +410,7 @@ class OIService:
                 self._on_sensor(pid, parsed)
             except Exception:
                 log.exception("on_sensor callback error")
+        self._publish_sensor(pid, parsed)
 
     def _decode_available_frames(self) -> None:
         """
@@ -555,20 +578,50 @@ class OIService:
                 time.sleep(TX_INTER_CMD_DELAY)
         log.info("TX writer exiting")
 
-
-    def _publish_sensor(self, packet_id: int, fields: Mapping[str, Value]) -> None:
+    def _send_with_result(self, frame: bytes) -> bool:
         """
-        Build and publish a typed SensorUpdate on topic 'sensors'.
-        Runs fast; if the EventBus queue is full we drop and continue (no IO stall).
+        Enqueue a frame for the TX writer thread and return True/False (did we enqueue?).
+        Does NOT block on actual port write; the writer thread will handle that.
         """
-        evt = SensorUpdate(
-            timestamp_millis=now_ms(),
-            packet_id=packet_id,
-            source="oi",
-            fields=fields,
-        )
-        ok = self._eventbus.publish("sensors", evt)
+        if not frame or not self._alive.is_set():
+            return False
+        ok = self._tx_frames.put(frame, timeout=Q_PUT_TIMEOUT)
         if not ok:
-            # Minimal early behavior: make it visible during bring-up.
-            # Later we will publish a Fault event instead of printing.
-            print("[WARN] EventBus full; dropped SensorUpdate", packet_id, fields)
+            # Optional: publish a typed Fault here instead of (or in addition to) logging
+            log.warning("[TxFrameQueue] overflow: dropped frame len=%d", len(frame))
+        return ok
+
+    def handle_stop(self, cmd: StopCmd) -> bool:
+        """Command Bus handler: immediate stop via OI 'STOP' frame."""
+        frame = oi_codec.encode_stop()
+        return self._send_with_result(frame)
+
+    def handle_drive(self, cmd: DriveCmd) -> bool:
+        """
+        Drive using linear/angular speeds.
+        Requires codec support for encode_drive.
+        """
+        if not getattr(self, "_alive", None) or not self._alive.is_set():
+            return False
+        if not hasattr(oi_codec, "encode_drive"):
+            return False  # explicit: twist driving not supported by codec
+        try:
+            frame = oi_codec.encode_drive(cmd.linear_mm_s, cmd.angular_deg_s)
+        except Exception:
+            return False
+        return self._send_with_result(frame)
+
+    def handle_drive_direct(self, cmd: DriveDirectCmd) -> bool:
+        """
+        Drive by direct wheel speeds.
+        Requires codec support for encode_drive_direct.
+        """
+        if not getattr(self, "_alive", None) or not self._alive.is_set():
+            return False
+        if not hasattr(oi_codec, "encode_drive_direct"):
+            return False  # explicit: direct driving not supported by codec
+        try:
+            frame = oi_codec.encode_drive_direct(cmd.left_mm_s, cmd.right_mm_s)
+        except Exception:
+            return False
+        return self._send_with_result(frame)
