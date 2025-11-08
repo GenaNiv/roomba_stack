@@ -144,3 +144,41 @@ How to configure speakerphone:
   323  mpv --no-video --ao=pulse --ytdl-format=bestaudio --volume=70   "ytdl://ytsearch1:Taylor Swift official audio"
   324  mpv --no-video --ao=pulse --ytdl-format=bestaudio --volume=70   "ytdl://ytsearch1:Taylor Swift August official audio"
   325  mpv --no-video --ao=pulse --ytdl-format=bestaudio --volume=70   "ytdl://ytsearch1:beatles let it be official audio"
+
+
+  ## Voice Gateway (MVP)
+
+This runner bridges external voice services to the stack via HTTP and routes intents.
+
+### Run
+```bash
+python apps/gateway.py
+
+# Speaker identity (from your GMM service)
+curl -i -H "Content-Type: application/json" \
+  -d '{"topic":"voice.speaker","ts":1730900000000,"speaker":"gena","confidence":0.94}' \
+  http://127.0.0.1:8765/
+
+# Transcript (from STT/KWS)
+curl -i -H "Content-Type: application/json" \
+  -d '{"topic":"voice.transcript","ts":1730900000500,"text":"stop","confidence":0.92}' \
+  http://127.0.0.1:8765/
+
+What happens
+
+VoiceHttpBridge (HTTP → EventBus) publishes SpeakerIdentity / AudioTranscript.
+
+VoiceAuthPolicy (allowlist + TTL + greeting cooldown) emits TtsRequest greetings.
+
+IntentRouter (MVP) maps “stop” to StopCmd with a confirmation window.
+
+PrintTtsAdapter subscribes to voice.tts and prints [SAY] ... lines.
+
+Configuration notes
+
+Allowed speakers and thresholds live in apps/gateway.py (see VoiceAuthConfig and IntentThresholds).
+
+The EventBus queue is bounded; if overloaded, newest TTS publishes may drop (protects producer threads).
+
+Replace PrintTtsAdapter with a real TTS adapter later without changing domain logic.
+
