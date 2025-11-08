@@ -107,3 +107,74 @@ class AudioTranscript:
     text: str
     confidence: float | None = None
     source: str | None = None
+    
+@dataclass(frozen=True, slots=True)
+class SpeakerIdentity:
+    """
+    Who spoke (from a speaker-ID service).
+
+    Fields:
+      timestamp_millis: Wall-clock ms when the utterance was observed.
+      speaker: Canonical, lowercase speaker name (e.g., "gena").
+      confidence: Optional confidence score from the recognizer (0.0–1.0).
+      source: Optional source tag (e.g., "gmm").
+    """
+    timestamp_millis: int
+    speaker: str
+    confidence: float | None = None
+    source: str | None = None
+
+@dataclass(frozen=True, slots=True)
+class TtsRequest:
+    """
+    Text-to-Speech (TTS) request published on the EventBus for a TTS adapter to speak.
+
+    Purpose
+    -------
+    Represent a human-facing spoken message as an immutable value object so any part
+    of the system (policy, router, safety checks, CLI) can request audible feedback
+    without knowing how audio is produced.
+
+    Fields
+    ------
+    timestamp_millis : int
+        Wall-clock time in milliseconds when the request was created (use now_ms()).
+        Useful for ordering, telemetry, and time-based coalescing.
+    text : str
+        The exact phrase to speak. Keep short and self-contained. Do not include SSML
+        unless your TTS adapter explicitly supports it.
+    priority : int, default 0
+        Higher numbers indicate higher urgency. Adapters may use this to reorder,
+        preempt, or drop lower-priority messages under load. The semantics are
+        adapter-defined; the contract is that larger means “more important.”
+
+    Threading and Delivery
+    ----------------------
+    • Created and published from any thread.
+    • Delivered to subscribers on the EventBus dispatcher thread (single thread),
+      ensuring no listener races.
+    • Adapters should avoid blocking the dispatcher; offload audio playback to their
+      own worker thread or process.
+
+    Typical Topics
+    --------------
+    Publish on a dedicated topic such as "voice.tts" (convention), e.g.:
+        eventbus.publish("voice.tts", TtsRequest(now_ms(), "Hello Gena, how can I help?", 5))
+
+    Usage Examples
+    --------------
+    • Greeting a newly authorized speaker:
+        TtsRequest(now_ms(), f"Hello {name}, how can I help?", priority=5)
+    • Error / clarification:
+        TtsRequest(now_ms(), "I did not catch that. Please repeat.", priority=3)
+    • Safety notice:
+        TtsRequest(now_ms(), "Stopping now.", priority=9)
+
+    Notes
+    -----
+    This class expresses *what to say*, not *how to say it*. Voice selection,
+    playback device, and rate are the responsibility of the TTS adapter.
+    """
+    timestamp_millis: int
+    text: str
+    priority: int = 0
