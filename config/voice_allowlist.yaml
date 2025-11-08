@@ -1,0 +1,5 @@
+allowed_speakers:
+  - gena
+min_confidence: 0.85
+auth_ttl_ms: 15000
+greet_cooldown_ms: 30000
