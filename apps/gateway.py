@@ -17,6 +17,8 @@ from roomba_stack.l0_core.events import (
 from roomba_stack.l3_domain.bridges.voice_http_bridge import VoiceHttpBridge
 from roomba_stack.l3_domain.voice.auth_policy import VoiceAuthPolicy, VoiceAuthConfig
 from roomba_stack.l3_domain.voice.intent_router import IntentRouter, IntentThresholds
+from roomba_stack.l3_domain.tts.print_adapter import PrintTtsAdapter
+
 
 
 # --- tiny helper to pretty-print any events on a topic (debug/observability) ---
@@ -69,11 +71,14 @@ def main() -> int:
         # Any component can call this to "speak"; we publish to a well-known topic.
         bus.publish("voice.tts", req)
 
-    def _on_tts(req: TtsRequest) -> None:
-        # Human-facing feedback (what the robot would say)
-        print(f"[TTS] {req.text} (priority={req.priority})")
+    #def _on_tts(req: TtsRequest) -> None:
+    #    # Human-facing feedback (what the robot would say)
+    #    print(f"[TTS] {req.text} (priority={req.priority})")
+    
+    # create the adapter
+    tts = PrintTtsAdapter()
 
-    bus.subscribe("voice.tts", _on_tts)
+    bus.subscribe("voice.tts", tts.on_event)
 
     # 3) Speaker authorization policy -------------------------------------------
     #    Encapsulates: allowlist, confidence threshold, sliding TTL window,
