@@ -18,6 +18,7 @@ from roomba_stack.l3_domain.bridges.voice_http_bridge import VoiceHttpBridge
 from roomba_stack.l3_domain.voice.auth_policy import VoiceAuthPolicy, VoiceAuthConfig
 from roomba_stack.l3_domain.voice.intent_router import IntentRouter, IntentThresholds
 from roomba_stack.l3_domain.tts.print_adapter import PrintTtsAdapter
+from roomba_stack.l3_domain.voice.config import load_allowlist
 
 
 
@@ -83,16 +84,28 @@ def main() -> int:
     # 3) Speaker authorization policy -------------------------------------------
     #    Encapsulates: allowlist, confidence threshold, sliding TTL window,
     #    and a greeting with cooldown when someone first becomes authorized.
+    # --- Speaker authorization policy (from external config) ---
+    try:
+        allow = load_allowlist("config/voice_allowlist.yaml")
+        # optional: print once so you know what was loaded
+        print(f"[gateway] allowlist: {sorted(allow.allowed_speakers)}  "
+            f"(min_conf={allow.min_confidence}, ttl={allow.auth_ttl_ms}ms, "
+            f"greet_cooldown={allow.greet_cooldown_ms}ms)")
+    except Exception as e:
+        # Safe fallback if file missing or malformed
+        print(f"[gateway] WARN: failed to load allowlist ({e}); using fallback {{'gena'}}")
+        from roomba_stack.l3_domain.voice.config import VoiceAllowlist as _VA
+        allow = _VA(allowed_speakers=frozenset({"gena"}))
+
     cfg = VoiceAuthConfig(
-        allowed_speakers=frozenset({"gena"}),  # <-- edit to your allowlist
-        auth_ttl_ms=15_000,                    # authorized for 15s after a good ID
-        min_confidence=0.85,                   # ignore IDs below this confidence
-        greet_cooldown_ms=30_000,              # avoid greeting spam
+        allowed_speakers=allow.allowed_speakers,
+        auth_ttl_ms=allow.auth_ttl_ms,
+        min_confidence=allow.min_confidence,
+        greet_cooldown_ms=allow.greet_cooldown_ms,
     )
     auth = VoiceAuthPolicy(config=cfg, emit_tts=_emit_tts)
-
-    # Subscribe the policy to identity events produced by the HTTP bridge
     bus.subscribe("voice.speaker", auth.on_speaker_identified)
+
 
     # 4) Command bus + minimal handler(s) ---------------------------------------
     #    CommandBus is synchronous: it routes a command object to its handler.
