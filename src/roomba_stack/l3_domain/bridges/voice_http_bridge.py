@@ -245,11 +245,17 @@ class VoiceHttpBridge:
                     text = str(msg.get("text", "")).strip()
                     if not text:
                         return self._bad(422, "missing text")
+                    
+                    # honor caller-supplied source if present, else default to "stt"
+                    src = str(msg.get("source", "stt")).strip().lower()
+                    if src not in ("stt", "kws"):
+                        src = "stt"
+
                     evt = AudioTranscript(
                         timestamp_millis=ts,
                         text=text,
                         confidence=_maybe_float(msg.get("confidence")),
-                        source="stt",
+                        source=src,              # was hard-coded "stt"
                     )
                     published = bus.publish("voice.transcript", evt)
 
