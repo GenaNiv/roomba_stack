@@ -182,3 +182,17 @@ The EventBus queue is bounded; if overloaded, newest TTS publishes may drop (pro
 
 Replace PrintTtsAdapter with a real TTS adapter later without changing domain logic.
 
+### KWS/STT integration
+
+Any keyword spotter (KWS) or speech-to-text (STT) engine can send events to the gateway via HTTP.
+
+**Use the helper CLI**
+```bash
+# Keyword spotter hit (normalized as transcript)
+python apps/voice_post.py --transcript "stop" --confidence 0.97 --source kws
+
+# STT transcript
+python apps/voice_post.py --transcript "turn left" --confidence 0.88 --source stt
+
+# Speaker identity (GMM)
+python apps/voice_post.py --speaker "gena" --confidence 0.94
