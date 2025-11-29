@@ -12,40 +12,65 @@ T = TypeVar("T")
 
 class CommandBus:
     """
-    Simple, in-process command router.
+    Minimal synchronous command router.
 
-    Usage:
-      bus = CommandBus()
-      bus.register(StopCmd, handler)
-      result = bus.call(StopCmd(reason="user"))
+    Each command class (StopCmd, DriveCmd, etc.) can have exactly one handler. `call`
+    executes the bound handler on the caller's thread so upstream layers stay in the
+    Half-Sync / Half-Async model—command producers do not touch `OIService` directly.
     """
 
     def __init__(self) -> None:
-        # One handler per command type
         self._handlers: Dict[Type[Any], Callable[[Any], Any]] = {}
 
     def register(self, command_type: Type[T], handler: Callable[[T], Any]) -> None:
-        """Associate a command class with its handler callable."""
+        """
+        Bind ``handler`` to ``command_type``.
+
+        Parameters
+        ----------
+        command_type : Type[T]
+            The dataclass/type representing the command.
+        handler : Callable[[T], Any]
+            Callable invoked whenever ``command_type`` is dispatched. Runs on
+            the caller's thread; must be thread-safe or delegate as needed.
+
+        Raises
+        ------
+        ValueError
+            If ``command_type`` is already registered.
+        """
         if command_type in self._handlers:
             raise ValueError(f"Handler already registered for {command_type.__name__}")
         self._handlers[command_type] = handler
 
     def call(self, command: T) -> Any:
-        """Synchronously execute the handler for the given command instance."""
+        """
+        Execute the handler for ``command`` synchronously.
+
+        Parameters
+        ----------
+        command : T
+            Concrete command instance to route. Its type determines which
+            handler is selected.
+
+        Raises
+        ------
+        LookupError
+            If no handler has been registered for ``type(command)``.
+        """
         command_type = type(command)
         handler = self._handlers.get(command_type)
         if handler is None:
             raise LookupError(f"No handler registered for {command_type.__name__}")
-        # Synchronous call: caller waits for the handler to finish and return a result.
         return handler(command)
 
 class EventBus:
     """
-    In-process publish/subscribe.
+    Lightweight in-process pub/sub.
 
-    - A bounded queue prevents unbounded memory growth during bursts.
-    - One dispatcher thread delivers events in order to all subscribers.
-    - All subscriber callbacks run on the dispatcher thread (no data races among listeners).
+    * Bounded queue prevents unbounded growth (drop-newest policy).
+    * Single dispatcher thread delivers events serially to all subscribers.
+    * Subscribers run on the dispatcher thread, so keep handlers non-blocking.
     """
 
     def __init__(self, capacity: int = 1024, publish_timeout_ms: int = 10) -> None:
@@ -60,9 +85,30 @@ class EventBus:
 
     # ---- subscription API ----
     def subscribe(self, topic: str, callback: Callable[[object], None]) -> None:
+        """
+        Register ``callback`` to receive events for ``topic``.
+
+        Parameters
+        ----------
+        topic : str
+            Topic name (e.g., "sensors", "voice.transcript").
+        callback : Callable[[object], None]
+            Function invoked with the event payload. Runs on the dispatcher
+            thread; keep it fast or offload work internally.
+        """
         self._subscribers[topic].append(callback)
 
     def unsubscribe(self, topic: str, callback: Callable[[object], None]) -> None:
+        """
+        Remove ``callback`` from ``topic`` if previously subscribed.
+
+        Parameters
+        ----------
+        topic : str
+            Topic name.
+        callback : Callable[[object], None]
+            Callback to remove.
+        """
         if callback in self._subscribers[topic]:
             self._subscribers[topic].remove(callback)
 

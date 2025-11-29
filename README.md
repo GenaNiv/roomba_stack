@@ -146,6 +146,37 @@ How to configure speakerphone:
   325  mpv --no-video --ao=pulse --ytdl-format=bestaudio --volume=70   "ytdl://ytsearch1:beatles let it be official audio"
 
 
+## Developer Shell (Maintenance Console)
+
+`apps/dev_shell.py` mirrors the production wiring (EventBus + CommandBus + OIService + voice stack) but exposes a REPL for manual testing.
+
+### Run
+```bash
+PYTHONPATH=src python apps/dev_shell.py --device /dev/ttyUSB0 --baud 115200
+```
+
+### Useful commands
+- `speaker gena 0.95` → publish `SpeakerIdentity` (authorizes the voice path).
+- `transcript "stop" 0.90` → publish a transcript; IntentRouter maps “stop” to `StopCmd`.
+- `drive --straight 200` / `drive_direct 200 200` → enqueue motion commands via `CommandBus`.
+- `dock`, `reset`, `start`, `safe`, `full` → dispatch the corresponding mode/dock commands.
+- `state` → print the latest `RobotSnapshot`; `queues` → dump EventBus/Rx/Tx queue depth.
+
+### VS Code launch (add to `.vscode/launch.json`)
+```jsonc
+{
+  "name": "Python: Dev Shell",
+  "type": "python",
+  "request": "launch",
+  "program": "${workspaceFolder}/apps/dev_shell.py",
+  "args": ["--device", "/dev/ttyUSB0", "--baud", "115200"],
+  "env": {"PYTHONPATH": "${workspaceFolder}/src"},
+  "console": "integratedTerminal"
+}
+```
+
+Attach the debugger to break inside `IntentRouter` or `OIService` while driving the robot from the shell.
+
   ## Voice Gateway (MVP)
 
 This runner bridges external voice services to the stack via HTTP and routes intents.
