@@ -35,7 +35,19 @@ from . import oi_decode
 from . import oi_protocol
 from .protocol_queue import BoundedQueue
 from roomba_stack.l0_core import EventBus
-from roomba_stack.l0_core.events import SensorUpdate, now_ms, Value, Fault, Severity, StopCmd, DriveCmd, DriveDirectCmd # Value = int|float|bool|str
+from roomba_stack.l0_core.events import (
+    SensorUpdate,
+    now_ms,
+    Value,
+    Fault,
+    Severity,
+    StopCmd,
+    DockCmd,
+    ChangeModeCmd,
+    ResetCmd,
+    DriveCmd,
+    DriveDirectCmd,
+)  # Value = int|float|bool|str
 
 # -----------------------------------------------------------------------------
 # Feature flags / architecture
@@ -596,6 +608,40 @@ class OIService:
         frame = oi_codec.encode_stop()
         return self._send_with_result(frame)
 
+    def handle_dock(self, cmd: DockCmd) -> bool:
+        """Command Bus handler: immediate dock via OI 'DOCK' frame."""
+        frame = oi_codec.encode_dock()
+        return self._send_with_result(frame)
+
+    def handle_change_mode(self, cmd: ChangeModeCmd) -> bool:
+        """
+        Command Bus handler: change high-level OI mode (start/safe/full).
+        """
+        actions = {
+            "start": self.start,
+            "safe": self.safe,
+            "full": self.full,
+        }
+        action = actions.get(cmd.mode.strip().lower())
+        if not action:
+            log.warning("Unknown mode command: %s", cmd.mode)
+            return False
+        try:
+            action()
+        except Exception:
+            log.exception("Mode command '%s' failed", cmd.mode)
+            return False
+        return True
+
+    def handle_reset(self, cmd: ResetCmd) -> bool:
+        """Command Bus handler: soft reset (opcode 7)."""
+        try:
+            self.reset()
+        except Exception:
+            log.exception("Reset command failed")
+            return False
+        return True
+    
     def handle_drive(self, cmd: DriveCmd) -> bool:
         """
         Drive using linear/angular speeds.

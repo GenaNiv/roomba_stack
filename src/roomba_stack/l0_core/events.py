@@ -75,10 +75,17 @@ class Fault:
 @dataclass(frozen=True, slots=True)
 class DriveCmd:
     """
-    Request to drive the robot.
-    - linear_mm_s: forward/backward speed (+forward, -backward)
-    - angular_deg_s: rotation speed (+CCW, -CW)
-    - duration_ms: optional max duration; handler may clamp/ignore if 0 or None
+    High-level twist drive request pushed through the CommandBus.
+
+    Attributes
+    ----------
+    linear_mm_s : int
+        Forward/backward speed in millimetres per second. Positive = forward.
+    angular_deg_s : int
+        Encodes turning behaviour (matches OI radius semantics). Use ±1 for spins,
+        ±2000 for arcs, or the straight constants (-32768 or 32767).
+    duration_ms : int | None
+        Optional maximum duration. Handlers may ignore None/0 and rely on StopCmd.
     """
     linear_mm_s: int
     angular_deg_s: int
@@ -87,8 +94,8 @@ class DriveCmd:
 @dataclass(frozen=True, slots=True)
 class DriveDirectCmd:
     """
-    Request to drive by direct wheel speeds (mm/s).
-    Positive = forward; negative = backward.
+    Low-level wheel-speed command (right/left mm/s) for differential drive control.
+    Positive values move forward, negative values reverse.
     """
     left_mm_s: int
     right_mm_s: int
@@ -97,7 +104,41 @@ class DriveDirectCmd:
 @dataclass(frozen=True, slots=True)
 class StopCmd:
     """
-    Request to stop motion (and optionally provide a reason for logging).
+    Immediate stop request.
+
+    reason : str
+        Free-form tag recorded in telemetry/logs (e.g., "voice", "safety").
+    """
+    reason: str = "user"
+
+@dataclass(frozen=True, slots=True)
+class DockCmd:
+    """
+    Seek-dock command (opcode 143 equivalent).
+
+    reason : str
+        Tag for audits (e.g., "voice", "battery-low").
+    """
+    reason: str = "user"
+
+@dataclass(frozen=True, slots=True)
+class ChangeModeCmd:
+    """
+    Request to change the robot's OI mode (start/safe/full).
+
+    mode : str
+        Canonical lowercase string identifying the destination mode.
+    """
+    mode: str
+
+@dataclass(frozen=True, slots=True)
+class ResetCmd:
+    """
+    Soft reset request (opcode 7) kept separate from ChangeModeCmd so handlers can
+    do pre/post bookkeeping specific to reset flows.
+
+    reason : str
+        Tag for logs (e.g., "voice", "watchdog").
     """
     reason: str = "user"
     

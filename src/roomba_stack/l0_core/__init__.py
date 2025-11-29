@@ -12,13 +12,13 @@ Public API (to be implemented in subsequent steps):
 from .events import (  # noqa: F401
     now_ms, Severity,
     SensorUpdate, TaskStatus, AudioTranscript, Fault,
-    DriveCmd, StopCmd,
+    DriveCmd, DriveDirectCmd, StopCmd, DockCmd, ChangeModeCmd, ResetCmd,
 )
 from .bus import EventBus, CommandBus  # noqa: F401
 
 __all__ = [
     "now_ms", "Severity",
     "SensorUpdate", "TaskStatus", "AudioTranscript", "Fault",
-    "DriveCmd", "StopCmd",
+    "DriveCmd", "DriveDirectCmd", "StopCmd", "DockCmd", "ChangeModeCmd", "ResetCmd",
     "EventBus", "CommandBus",
 ]
