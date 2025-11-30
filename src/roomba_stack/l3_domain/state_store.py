@@ -33,7 +33,10 @@ class RobotStateStore:
 
     # ---- subscriber callback (runs on Event Bus dispatcher thread) ----
     def _on_sensor_update(self, evt: SensorUpdate) -> None:
-        fields: Mapping[str, object] = evt.fields
+        fields = evt.fields
+        if not isinstance(fields, Mapping):
+            print(f"[SENSOR RAW] pid={evt.packet_id} data={fields}")
+            return
 
         left_ticks = self._pick_first_int(fields, ["encoder_counts_left", "left_encoder_ticks", "left_encoder"])
         right_ticks = self._pick_first_int(fields, ["encoder_counts_right", "right_encoder_ticks", "right_encoder"])
